@@ -1,0 +1,4 @@
+interface:
+  display_name: "Source Code Learning Coach"
+  short_description: "Learn repositories from source with resumable progress"
+  default_prompt: "Use $source-code-learning-coach to help me study this repository from real source code and preserve my progress."
