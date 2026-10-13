@@ -1,5 +1,7 @@
 # Source Code Learning Coach
 
+[简体中文](README.zh-CN.md) | English
+
 A reusable Codex Skill for learning unfamiliar repositories from real source code while preserving a resumable, auditable learning trail.
 
 It is designed for multi-day source study: it proposes a roadmap before creating notes, teaches one small call-chain segment at a time, tracks weighted checkpoint progress, and records source guides, Q&A, summaries, and optional diagram artifacts in a sibling learning workspace.
