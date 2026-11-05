@@ -13,6 +13,9 @@ It is designed for multi-day source study: it proposes a roadmap before creating
 - Uses authoritative JSON state with Markdown projections for resumable progress.
 - Keeps source-specific notes and artifacts attached to the source that owns them.
 - Guards learning-workspace paths, symlinks, transactions, concurrent edits, and artifact ownership.
+- Teaches each new call chain as a role-annotated execution call-chain tree first; real source is read closely only on the learner's explicit request.
+- After a closed flow, asks one oral question derived from that Day's acceptance criteria.
+- Archives an oral Q&A into `DayNN/口述回答归档.md` only after the learner explicitly confirms archiving; each entry keeps the fixed 题干 → 代码执行调用链 → 口述答案 order.
 - Asks for explicit consent before generating a diagram after a flow closes.
 - Keeps publication local by default; export requires a separate sanitized copy and a scan.
 

@@ -241,6 +241,24 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertTrue((learning_root / "学习状态.md").is_file())
         self.assertEqual(tree_hash(self.repo), self.repo_hash)
 
+    def test_init_creates_oral_answer_archive_for_every_day(self) -> None:
+        root = self.init_workspace()
+        expected_days = (
+            (root / "Day01" / "口述回答归档.md", "# Day 1｜入口"),
+            (root / "Day02" / "口述回答归档.md", "# Day 2｜依赖"),
+        )
+        for archive_path, title in expected_days:
+            with self.subTest(day=archive_path.parent.name):
+                self.assertTrue(archive_path.is_file())
+                content = archive_path.read_text(encoding="utf-8")
+                self.assertNotIn("{{", content)
+                self.assertNotIn("}}", content)
+                self.assertEqual(content.splitlines()[0], f"{title}｜口述回答归档")
+                self.assertIn("题干", content)
+                self.assertIn("代码执行调用链", content)
+                self.assertIn("口述答案", content)
+                self.assertIn("仅在学员明确同意归档后追加记录", content)
+
     def test_templates_project_durable_learning_content(self) -> None:
         root = self.init_workspace()
         self.assertIn(
@@ -1466,6 +1484,7 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_start_day_rejects_symlinked_day_parent_without_external_writes(self) -> None:
         root = self.init_workspace()
         day_directory = root / "Day01"
+        (day_directory / "口述回答归档.md").unlink()
         day_directory.rmdir()
         external_day = self.base / "external-day-before-start"
         external_day.mkdir()

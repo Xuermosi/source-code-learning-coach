@@ -2731,7 +2731,16 @@ def command_init(args: argparse.Namespace) -> Path:
     try:
         day_width = max(2, len(str(route_days)))
         for day in normalized["days"]:
-            (temporary_root / f"Day{day['day']:0{day_width}d}").mkdir()
+            day_directory = temporary_root / f"Day{day['day']:0{day_width}d}"
+            day_directory.mkdir()
+            materialize_template(
+                "oral-answer-archive.md",
+                day_directory / "口述回答归档.md",
+                {
+                    "DAY_NUMBER": day["day"],
+                    "DAY_TITLE": day["title"],
+                },
+            )
 
         learning_root_id = str(uuid.uuid4())
         state = _initial_state(normalized, repository, final_root, learning_root_id)
