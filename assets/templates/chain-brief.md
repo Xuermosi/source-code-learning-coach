@@ -1,6 +1,7 @@
 # Day {{DAY_NUMBER}}｜链路 {{CHAIN_ORDER}}｜{{CHAIN_NAME}}
 
 - 创建时间：{{TIMESTAMP}}
+- 源码入口：（待补充：本链要读的仓库文件/符号）
 
 ## 本链调用链树
 

@@ -23,11 +23,9 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CHAIN_MARKER_KIND = "source-code-learning-chain"
 CHAIN_MARKER_VERSION = 1
-SOURCE_MARKER_KIND = "source-code-learning-source"
-SOURCE_MARKER_VERSION = 1
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "templates"
 TEMPLATE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 TEMPLATE_TOKEN_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
@@ -748,7 +746,7 @@ def _initial_state(
             "closed_flows": [],
         },
         "chains": [],
-        "sources": [],
+        "artifacts": [],
         "artifacts": [],
         "history": [],
         "updated_at": _utc_timestamp(),
@@ -867,7 +865,7 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         raise WorkspaceError("state route_title must be non-empty text")
     if not isinstance(state.get("updated_at"), str) or not state["updated_at"]:
         raise WorkspaceError("state updated_at must be text")
-    for collection_name in ("sources", "artifacts", "history"):
+    for collection_name in ("artifacts", "history"):
         if not isinstance(state.get(collection_name), list):
             raise WorkspaceError(f"state {collection_name} must be a list")
     if any(not isinstance(entry, dict) for entry in state["history"]):
@@ -1012,96 +1010,8 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
                 f"chain orders are not consecutive in Day {day_number}"
             )
 
-    source_identities: set[tuple[str, str]] = set()
-    source_paths: set[str] = set()
-    source_orders: dict[str, set[int]] = {}
-    for source_record in state["sources"]:
-        if not isinstance(source_record, dict):
-            raise WorkspaceError("invalid source record")
-        source_day = source_record.get("day")
-        canonical_source_text = source_record.get("canonical_source_path")
-        relative_source_text = source_record.get("repository_relative_path")
-        relative_learning_text = source_record.get("relative_learning_dir")
-        order = source_record.get("order")
-        label = source_record.get("label")
-        created_at = source_record.get("created_at")
-        if type(source_day) is not int or not 1 <= source_day <= route_days:
-            raise WorkspaceError("source record Day is invalid")
-        if not isinstance(canonical_source_text, str):
-            raise WorkspaceError("source record canonical path is invalid")
-        try:
-            canonical_source = resolved_under(Path(canonical_source_text), repository)
-        except WorkspaceError as exc:
-            raise WorkspaceError("source record must reference a repository file") from exc
-        if str(canonical_source) != canonical_source_text or not canonical_source.is_file():
-            raise WorkspaceError("source record path must be a canonical regular file")
-        expected_repository_relative = canonical_source.relative_to(repository).as_posix()
-        if relative_source_text != expected_repository_relative:
-            raise WorkspaceError("source record repository-relative path is invalid")
-        if type(order) is not int or order <= 0:
-            raise WorkspaceError("source record order must be a positive integer")
-        if not isinstance(created_at, str) or not created_at:
-            raise WorkspaceError("source record created_at must be text")
-        try:
-            safe_label = _validate_label_component(label)
-        except WorkspaceError as exc:
-            raise WorkspaceError("source record label is invalid") from exc
-        if not isinstance(relative_learning_text, str) or not relative_learning_text:
-            raise WorkspaceError("source record learning directory is invalid")
-        relative_learning = Path(relative_learning_text)
-        if relative_learning.is_absolute() or ".." in relative_learning.parts:
-            raise WorkspaceError("source record learning directory is unsafe")
-        day_directory_text = _day_directory(root, state, source_day).relative_to(root).as_posix()
-        if relative_learning.parent.as_posix() != day_directory_text:
-            raise WorkspaceError("source record is outside its Day")
-        if relative_learning.name != f"{order:02d}-{safe_label}":
-            raise WorkspaceError("source record directory name does not match its order and label")
-        identity = (source_day, canonical_source_text)
-        if identity in source_identities:
-            raise WorkspaceError("duplicate source identity in state")
-        source_identities.add(identity)
-        if relative_learning_text in source_paths:
-            raise WorkspaceError("duplicate source learning directory in state")
-        source_paths.add(relative_learning_text)
-        orders = source_orders.setdefault(day_directory_text, set())
-        if order in orders:
-            raise WorkspaceError("duplicate source order in Day")
-        orders.add(order)
-
-        source_directory = root / relative_learning
-        if source_directory.is_symlink() or not source_directory.is_dir():
-            raise WorkspaceError("source learning directory is missing or invalid")
-        try:
-            canonical_directory = resolved_under(source_directory, root)
-        except WorkspaceError as exc:
-            raise WorkspaceError("source learning directory escapes the learning root") from exc
-        if canonical_directory != source_directory:
-            raise WorkspaceError("source learning directory must be canonical")
-        expected_source_marker = _expected_source_marker(
-            state["learning_root_id"],
-            day_directory_text,
-            canonical_source_text,
-            relative_learning_text,
-            order,
-            safe_label,
-        )
-        try:
-            actual_source_marker = read_json(source_directory / ".learning-source.json")
-        except WorkspaceError as exc:
-            raise WorkspaceError("source learning marker is missing or invalid") from exc
-        if actual_source_marker != expected_source_marker:
-            raise WorkspaceError("source learning marker does not match authoritative state")
-
-    for day_directory_text, orders in source_orders.items():
-        if orders != set(range(1, len(orders) + 1)):
-            raise WorkspaceError(f"source orders are not consecutive in Day: {day_directory_text}")
-
     artifacts_seen: set[str] = set()
     artifact_identities_seen: set[tuple[int, int]] = set()
-    source_by_owner_id = {
-        f"source:{entry['relative_learning_dir']}": entry
-        for entry in state["sources"]
-    }
     for artifact_record in state["artifacts"]:
         if not isinstance(artifact_record, dict):
             raise WorkspaceError("invalid artifact record")
@@ -1113,7 +1023,7 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         artifact_device = artifact_record.get("artifact_device")
         artifact_inode = artifact_record.get("artifact_inode")
         registered_at = artifact_record.get("registered_at")
-        if owner_kind not in {"source", "day-overview", "chain"}:
+        if owner_kind not in {"day-overview", "chain"}:
             raise WorkspaceError("artifact owner kind is invalid")
         if not isinstance(owner_id, str) or not owner_id:
             raise WorkspaceError("artifact owner ID is invalid")
@@ -1141,23 +1051,7 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         if not isinstance(registered_at, str) or not registered_at:
             raise WorkspaceError("artifact registered_at must be text")
 
-        if owner_kind == "source":
-            source_owner = source_by_owner_id.get(owner_id)
-            if source_owner is None:
-                raise WorkspaceError("artifact references an unknown source owner")
-            if relative_owner_text != source_owner["relative_learning_dir"]:
-                raise WorkspaceError("artifact source owner directory does not match")
-            owner_day = next(
-                (day for day in state["days"] if day.get("day") == source_owner["day"]),
-                None,
-            )
-            if owner_day is None or owner_day.get("status") not in {"active", "completed"}:
-                raise WorkspaceError("artifact source owner Day status is invalid")
-            allowed_directory = root / relative_owner / "产物"
-            expected_artifact = root / relative_owner / relative_artifact
-            if not relative_artifact.parts or relative_artifact.parts[0] != "产物":
-                raise WorkspaceError("source artifact must be inside its 产物 directory")
-        elif owner_kind == "day-overview":
+        if owner_kind == "day-overview":
             prefix = "day-overview:"
             if not owner_id.startswith(prefix):
                 raise WorkspaceError("day overview artifact owner ID is invalid")
@@ -1371,109 +1265,6 @@ def _expected_chain_marker(
     }
 
 
-def _expected_source_marker(
-    learning_root_id: str,
-    stage_id: str,
-    canonical_source_path: str,
-    relative_learning_dir: str,
-    order: int,
-    label: str,
-) -> dict:
-    return {
-        "kind": SOURCE_MARKER_KIND,
-        "marker_version": SOURCE_MARKER_VERSION,
-        "schema_version": SCHEMA_VERSION,
-        "learning_root_id": learning_root_id,
-        "stage_id": stage_id,
-        "canonical_source_path": canonical_source_path,
-        "relative_learning_dir": relative_learning_dir,
-        "order": order,
-        "label": label,
-    }
-
-
-def active_day_directory(state: dict, day_dir: Path) -> dict:
-    """Validate that day_dir is the active Day's canonical directory and return its record."""
-    root = Path(state["learning_root"])
-    try:
-        relative = Path(day_dir).relative_to(root).as_posix()
-    except ValueError as exc:
-        raise WorkspaceError("Day directory is outside the learning root") from exc
-    active = _active_day(state)
-    expected = _day_directory(root, state, active["day"]).relative_to(root).as_posix()
-    if relative != expected:
-        raise WorkspaceError("source registration requires the active Day directory")
-    return active
-
-
-def source_label(source: Path, repo: Path, requested: str | None, used: set[str]) -> str:
-    label = _validate_label_component(requested if requested is not None else source.name)
-    if label not in used:
-        return label
-
-    repository_relative = source.relative_to(repo)
-    parent_suffix = "-".join(repository_relative.parent.parts) or "root"
-    parent_suffix = _validate_label_component(parent_suffix)
-    suffix = source.suffix
-    stem = label[: -len(suffix)] if suffix and label.endswith(suffix) else label
-    candidate = _validate_label_component(f"{stem}-{parent_suffix}{suffix}")
-    if candidate not in used:
-        return candidate
-    stable_id = hashlib.sha256(repository_relative.as_posix().encode("utf-8")).hexdigest()[:8]
-    candidate = _validate_label_component(
-        f"{stem}-{parent_suffix}-{stable_id}{suffix}"
-    )
-    if candidate not in used:
-        return candidate
-    raise WorkspaceError("source label collides with an existing source in this Day")
-
-
-def _owned_source_directory(path: Path, expected_marker: dict) -> bool:
-    if path.is_symlink() or not path.is_dir():
-        return False
-    try:
-        marker = read_json(path / ".learning-source.json")
-    except WorkspaceError:
-        return False
-    return marker == expected_marker
-
-
-def _remove_owned_source(root: Path, path: Path, expected_marker: dict) -> None:
-    try:
-        parent = path.parent.resolve(strict=True)
-    except OSError:
-        return
-    if (
-        path.parent.is_symlink()
-        or parent != path.parent
-        or not _is_within(parent, root)
-        or path.is_symlink()
-    ):
-        return
-    if _owned_source_directory(path, expected_marker):
-        shutil.rmtree(path)
-
-
-def source_creation_seam(day_dir: Path) -> None:
-    """Test seam immediately before fd-relative source-directory creation."""
-
-
-def source_temp_creation_seam(day_fd: int, temp_name: str, temp_fd: int) -> None:
-    """Test seam after opening a generated temp directory by stable identity."""
-
-
-def _require_source_dir_fd_support() -> None:
-    required_dir_fd = (os.open, os.mkdir, os.stat, os.unlink, os.rmdir)
-    if any(function not in os.supports_dir_fd for function in required_dir_fd):
-        raise WorkspaceError(
-            "secure add-source requires dir_fd operations on this platform"
-        )
-    if os.listdir not in os.supports_fd:
-        raise WorkspaceError(
-            "secure add-source requires directory-fd listing on this platform"
-        )
-
-
 def _open_directory_at(parent_fd: int, name: str) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     return os.open(name, flags, dir_fd=parent_fd)
@@ -1494,225 +1285,6 @@ def _read_json_at(directory_fd: int, name: str) -> dict:
     if not isinstance(value, dict):
         raise WorkspaceError(f"generated marker must be an object: {name}")
     return value
-
-
-def _write_text_at(directory_fd: int, name: str, content: str) -> None:
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
-    try:
-        payload = content.encode("utf-8")
-        offset = 0
-        while offset < len(payload):
-            offset += os.write(descriptor, payload[offset:])
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _rename_no_replace_at(directory_fd: int, source_name: str, target_name: str) -> None:
-    source = os.fsencode(source_name)
-    target = os.fsencode(target_name)
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin":
-        try:
-            rename = libc.renameatx_np
-        except AttributeError as exc:
-            raise WorkspaceError("atomic fd-relative publication is unavailable") from exc
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename.restype = ctypes.c_int
-        result = rename(directory_fd, source, directory_fd, target, 0x00000004)
-    elif sys.platform.startswith("linux"):
-        try:
-            rename = libc.renameat2
-        except AttributeError as exc:
-            raise WorkspaceError("atomic fd-relative publication is unavailable") from exc
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename.restype = ctypes.c_int
-        result = rename(directory_fd, source, directory_fd, target, 1)
-    else:
-        raise WorkspaceError("atomic fd-relative publication is unavailable")
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-        raise WorkspaceError(f"source target already exists: {target_name}")
-    if error_number in {errno.ENOSYS, errno.ENOTSUP}:
-        raise WorkspaceError("atomic fd-relative publication is unavailable")
-    raise OSError(error_number, os.strerror(error_number), target_name)
-
-
-def _stable_day_matches(
-    directory_fd: int, day_dir: Path, root: Path
-) -> bool:
-    """Day directories have no generated marker; identity is the canonical dir itself."""
-    try:
-        if day_dir.is_symlink() or day_dir.resolve(strict=True) != day_dir:
-            return False
-        day_dir.relative_to(root)
-        path_stat = os.stat(day_dir, follow_symlinks=False)
-        if not os.path.samestat(os.fstat(directory_fd), path_stat):
-            return False
-        return True
-    except (OSError, ValueError, WorkspaceError):
-        return False
-
-
-def _source_entry_exists_at(directory_fd: int, name: str) -> bool:
-    try:
-        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    return True
-
-
-def _remove_generated_source_at(
-    day_fd: int,
-    name: str,
-    expected_marker: dict | None,
-    *,
-    allow_partial: bool = False,
-) -> bool:
-    try:
-        source_fd = _open_directory_at(day_fd, name)
-    except (FileNotFoundError, NotADirectoryError, OSError):
-        return False
-    try:
-        return _remove_generated_source_handle_at(
-            day_fd,
-            name,
-            source_fd,
-            expected_marker,
-            allow_partial=allow_partial,
-        )
-    finally:
-        os.close(source_fd)
-
-
-def _entry_matches_fd(parent_fd: int, name: str, child_fd: int) -> bool:
-    try:
-        entry_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        return stat.S_ISDIR(entry_stat.st_mode) and os.path.samestat(
-            os.fstat(child_fd), entry_stat
-        )
-    except OSError:
-        return False
-
-
-def _remove_generated_source_handle_at(
-    day_fd: int,
-    name: str,
-    source_fd: int,
-    expected_marker: dict | None,
-    *,
-    allow_partial: bool = False,
-) -> bool:
-    if expected_marker is not None:
-        try:
-            marker = _read_json_at(source_fd, ".learning-source.json")
-        except WorkspaceError:
-            return False
-        if marker != expected_marker:
-            return False
-    elif not allow_partial:
-        return False
-    if not _entry_matches_fd(day_fd, name, source_fd):
-        return False
-    _clear_directory_at(source_fd)
-    if not _entry_matches_fd(day_fd, name, source_fd):
-        return False
-    os.rmdir(name, dir_fd=day_fd)
-    return True
-
-
-def _clear_directory_at(directory_fd: int) -> None:
-    for name in os.listdir(directory_fd):
-        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if stat.S_ISDIR(metadata.st_mode):
-            child_fd = _open_directory_at(directory_fd, name)
-            try:
-                if not _entry_matches_fd(directory_fd, name, child_fd):
-                    raise WorkspaceError(
-                        "generated child directory identity changed during cleanup"
-                    )
-                _clear_directory_at(child_fd)
-                if not _entry_matches_fd(directory_fd, name, child_fd):
-                    raise WorkspaceError(
-                        "generated child directory identity changed during cleanup"
-                    )
-            finally:
-                os.close(child_fd)
-            os.rmdir(name, dir_fd=directory_fd)
-        else:
-            os.unlink(name, dir_fd=directory_fd)
-
-
-def _create_source_directory_at(
-    day_fd: int,
-    target_name: str,
-    expected_marker: dict,
-    guide: str,
-) -> int:
-    temporary_name = f".{target_name}.tmp-{uuid.uuid4().hex}"
-    os.mkdir(temporary_name, 0o700, dir_fd=day_fd)
-    temporary_fd = _open_directory_at(day_fd, temporary_name)
-    try:
-        source_temp_creation_seam(day_fd, temporary_name, temporary_fd)
-        _write_text_at(
-            temporary_fd,
-            ".learning-source.json",
-            json.dumps(expected_marker, ensure_ascii=False, indent=2) + "\n",
-        )
-        _write_text_at(temporary_fd, "源码导读.md", guide)
-        os.mkdir("产物", 0o755, dir_fd=temporary_fd)
-        os.fsync(temporary_fd)
-    except BaseException as exc:
-        cleaned = _remove_generated_source_handle_at(
-            day_fd,
-            temporary_name,
-            temporary_fd,
-            None,
-            allow_partial=True,
-        )
-        os.close(temporary_fd)
-        if not cleaned:
-            raise WorkspaceError(
-                "generated temp identity changed; residue was preserved safely"
-            ) from exc
-        raise
-    try:
-        _rename_no_replace_at(day_fd, temporary_name, target_name)
-    except BaseException as exc:
-        cleaned = _remove_generated_source_handle_at(
-            day_fd,
-            temporary_name,
-            temporary_fd,
-            expected_marker,
-            allow_partial=False,
-        )
-        os.close(temporary_fd)
-        if not cleaned:
-            raise WorkspaceError(
-                "generated temp identity changed; residue was preserved safely"
-            ) from exc
-        raise
-    return temporary_fd
 
 
 def _owned_chain_directory(path: Path, expected_marker: dict) -> bool:
@@ -2052,172 +1624,6 @@ def command_set_resume(args: argparse.Namespace) -> Path:
     return root
 
 
-def command_add_source(args: argparse.Namespace) -> Path:
-    day_argument = Path(args.day_dir).expanduser()
-    if not day_argument.is_absolute():
-        day_argument = Path.cwd() / day_argument
-    day_argument = Path(os.path.abspath(day_argument))
-    if day_argument.is_symlink():
-        raise WorkspaceError("Day directory must not be a symlink")
-    try:
-        day_dir = day_argument.resolve(strict=True)
-    except OSError as exc:
-        raise WorkspaceError(f"Day directory does not exist: {day_argument}") from exc
-    if not day_dir.is_dir():
-        raise WorkspaceError("Day directory is not a directory")
-
-    try:
-        root = day_argument.parent.resolve(strict=True)
-    except OSError as exc:
-        raise WorkspaceError("cannot locate the learning root for the Day directory") from exc
-    state = load_state(root)
-    day = active_day_directory(state, day_dir)
-    repository = Path(state["repository"])
-    try:
-        source = resolved_under(Path(args.source), repository)
-    except WorkspaceError as exc:
-        raise WorkspaceError("source must be a regular file inside the repository") from exc
-    if not source.is_file():
-        raise WorkspaceError("source must be a regular file inside the repository")
-
-    existing = next(
-        (
-            entry
-            for entry in state["sources"]
-            if entry.get("day") == day["day"]
-            and entry.get("canonical_source_path") == str(source)
-        ),
-        None,
-    )
-    if existing is not None:
-        return root / existing["relative_learning_dir"]
-
-    _require_source_dir_fd_support()
-
-    day_sources = [
-        entry for entry in state["sources"] if entry.get("day") == day["day"]
-    ]
-    order = len(day_sources) + 1
-    label = source_label(
-        source,
-        repository,
-        getattr(args, "label", None),
-        {entry["label"] for entry in day_sources},
-    )
-    target = day_dir / f"{order:02d}-{label}"
-    relative_learning_dir = target.relative_to(root).as_posix()
-    day_directory_text = day_dir.relative_to(root).as_posix()
-    expected_marker = _expected_source_marker(
-        state["learning_root_id"],
-        day_directory_text,
-        str(source),
-        relative_learning_dir,
-        order,
-        label,
-    )
-    guide = render_named_template(
-        "source-guide.md",
-        {
-            "SOURCE_LABEL": label,
-            "CANONICAL_SOURCE_PATH": source,
-            "REPOSITORY_RELATIVE_PATH": source.relative_to(repository).as_posix(),
-            "DAY_ID": day_directory_text,
-            "SYMBOLS_LINES": "待补充",
-            "CALLER": "待确认",
-            "CALLEE": "待确认",
-            "CURRENT_UNDERSTANDING": "待整理",
-            "NEXT_HOP": "待确认",
-            "RELATED_SOURCES": "暂无",
-            "ARTIFACTS": "- 暂无已登记产物",
-        },
-    )
-    open_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        day_fd = os.open(day_dir, open_flags)
-    except OSError as exc:
-        raise WorkspaceError("active Day directory changed before source registration") from exc
-    created = False
-    published_fd: int | None = None
-    try:
-        if not _stable_day_matches(day_fd, day_dir, root):
-            raise WorkspaceError("active Day directory changed before source registration")
-        if _source_entry_exists_at(day_fd, target.name):
-            if not _remove_generated_source_at(
-                day_fd, target.name, expected_marker, allow_partial=False
-            ):
-                raise WorkspaceError(
-                    f"source target is occupied by an unknown directory: {target}"
-                )
-        source_creation_seam(day_dir)
-        if not _stable_day_matches(day_fd, day_dir, root):
-            raise WorkspaceError("active Day directory changed before source directory creation")
-        published_fd = _create_source_directory_at(
-            day_fd, target.name, expected_marker, guide
-        )
-        created = True
-        if (
-            not _stable_day_matches(day_fd, day_dir, root)
-            or not _entry_matches_fd(day_fd, target.name, published_fd)
-        ):
-            cleaned = _remove_generated_source_handle_at(
-                day_fd,
-                target.name,
-                published_fd,
-                expected_marker,
-                allow_partial=False,
-            )
-            created = False
-            if not cleaned:
-                raise WorkspaceError(
-                    "generated source identity changed; residue was preserved safely"
-                )
-            raise WorkspaceError("active Day directory changed during source directory creation")
-
-        record = {
-            "day": day["day"],
-            "canonical_source_path": str(source),
-            "repository_relative_path": source.relative_to(repository).as_posix(),
-            "relative_learning_dir": relative_learning_dir,
-            "order": order,
-            "label": label,
-            "created_at": _utc_timestamp(),
-        }
-        state["sources"].append(record)
-        _append_history(
-            state,
-            "add-source",
-            day=day["day"],
-            source=str(source),
-            directory=relative_learning_dir,
-        )
-        try:
-            save_state(root, state)
-        except BaseException as exc:
-            if created and not _state_was_committed(root, state):
-                cleaned = _remove_generated_source_handle_at(
-                    day_fd,
-                    target.name,
-                    published_fd,
-                    expected_marker,
-                    allow_partial=False,
-                )
-                if not cleaned:
-                    raise WorkspaceError(
-                        "authority commit failed after generated source identity changed; "
-                        "residue was preserved safely"
-                    ) from exc
-            raise
-    finally:
-        if published_fd is not None:
-            os.close(published_fd)
-        os.close(day_fd)
-    return target
-
-
 def _absolute_input_without_parent_segments(value: str, label: str) -> Path:
     if not isinstance(value, str) or not value:
         raise WorkspaceError(f"{label} path must be non-empty text")
@@ -2348,39 +1754,7 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
 
     owner_kind = args.owner_kind
     owner_active_parent: dict | None = None
-    if owner_kind == "source":
-        try:
-            owner_relative_text = owner.relative_to(root).as_posix()
-        except ValueError as exc:
-            raise WorkspaceError(
-                "source artifact owner is outside the learning root"
-            ) from exc
-        matches = [
-            entry
-            for entry in state["sources"]
-            if entry.get("relative_learning_dir")
-            == owner_relative_text
-        ]
-        if len(matches) != 1:
-            raise WorkspaceError(
-                "source artifact owner must be a registered source"
-            )
-        relative_owner = matches[0]["relative_learning_dir"]
-        owner_active_parent = next(
-            (
-                day
-                for day in state["days"]
-                if day.get("day") == matches[0].get("day")
-            ),
-            None,
-        )
-        if owner_active_parent is None:
-            raise WorkspaceError("source artifact owner references an unknown Day")
-        owner_id = f"source:{relative_owner}"
-        allowed_directory = owner / "产物"
-        owner_markdown = owner / "源码导读.md"
-        markdown_name = "源码导读.md"
-    elif owner_kind == "day-overview":
+    if owner_kind == "day-overview":
         relative_owner_text = owner.relative_to(root).as_posix()
         if not relative_owner_text.endswith("/当日总览产物"):
             raise WorkspaceError(
@@ -2426,7 +1800,7 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
         owner_markdown = owner.parent / "链说明.md"
         markdown_name = "链说明.md"
     else:
-        raise WorkspaceError("owner kind must be source, day-overview, or chain")
+        raise WorkspaceError("owner kind must be day-overview or chain")
 
     if allowed_directory.is_symlink():
         raise WorkspaceError("artifact directory must not be a symlink")
@@ -2470,10 +1844,7 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
     try:
         if not _stable_path_matches_fd(owner, owner_fd, directory=True):
             raise WorkspaceError("artifact owner identity changed")
-        if owner_kind == "source":
-            allowed_fd = _open_directory_at(owner_fd, "产物")
-        else:
-            allowed_fd = os.dup(owner_fd)
+        allowed_fd = os.dup(owner_fd)
         if not _stable_path_matches_fd(allowed_directory, allowed_fd, directory=True):
             raise WorkspaceError("artifact directory identity changed")
         (
@@ -2524,12 +1895,7 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
             and existing.get("relative_artifact_path") != relative_artifact
         ):
             raise WorkspaceError("artifact ownership record is inconsistent")
-        if owner_kind == "source":
-            owner_is_active = (
-                owner_active_parent is not None
-                and owner_active_parent.get("status") == "active"
-            )
-        elif owner_kind == "day-overview":
+        if owner_kind == "day-overview":
             owner_is_active = (
                 owner_active_parent is not None
                 and owner_active_parent.get("status") == "active"
@@ -2810,20 +2176,12 @@ def build_parser() -> argparse.ArgumentParser:
     chain_parser.add_argument("--name", required=True)
     chain_parser.set_defaults(handler=command_begin_chain)
 
-    source_parser = subparsers.add_parser(
-        "add-source", help="register a repository source in the active Day"
-    )
-    source_parser.add_argument("--day-dir", required=True)
-    source_parser.add_argument("--source", required=True)
-    source_parser.add_argument("--label")
-    source_parser.set_defaults(handler=command_add_source)
-
     artifact_parser = subparsers.add_parser(
         "register-artifact", help="register a learning artifact with one active owner"
     )
     artifact_parser.add_argument("--learning-root", required=True)
     artifact_parser.add_argument(
-        "--owner-kind", required=True, choices=("source", "day-overview", "chain")
+        "--owner-kind", required=True, choices=("day-overview", "chain")
     )
     artifact_parser.add_argument("--owner-dir", required=True)
     artifact_parser.add_argument("--artifact", required=True)

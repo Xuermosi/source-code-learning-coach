@@ -11,7 +11,7 @@ It is designed for multi-day source study: it proposes a roadmap before creating
 - Scans a repository read-only and proposes dependency-ordered Days and checkpoints.
 - Requires roadmap confirmation before creating the persistent learning workspace.
 - Uses authoritative JSON state with Markdown projections for resumable progress.
-- Keeps source-specific notes and artifacts attached to the source that owns them.
+- Keeps chain-specific notes and artifacts attached to the chain that owns them.
 - Guards learning-workspace paths, symlinks, transactions, concurrent edits, and artifact ownership.
 - Divides each Day into explicitly named learning chains (`begin-chain`), each with its own `NN-链名/` directory holding a brief and a `产物/` folder for that chain's diagrams.
 - Teaches each new call chain as a role-annotated execution call-chain tree first; real source is read closely only on the learner's explicit request.
@@ -58,7 +58,7 @@ scripts/manage_learning_workspace.py
 tests/                           Transaction, safety, and behavior tests
 ```
 
-Inside a learning workspace, each Day directory holds `学习单元.md`, `口述回答归档.md`, Day-level `问题与解答.md` / `当日总结.md` / `当日总览产物/`, source directories (`NN-label/`), and named learning chains (`NN-链名/` with `链说明.md` and `产物/`).
+Inside a learning workspace, each Day directory holds `学习单元.md`, `口述回答归档.md`, Day-level `问题与解答.md` / `当日总结.md` / `当日总览产物/`, and named learning chains (`NN-链名/` with `链说明.md` and `产物/`).
 
 ## Verify
 

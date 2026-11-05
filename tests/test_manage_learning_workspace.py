@@ -66,27 +66,11 @@ def chain_marker(state: dict, day: int, order: int, name: str) -> dict:
     return {
         "kind": "source-code-learning-chain",
         "marker_version": 1,
-        "schema_version": 2,
+        "schema_version": 3,
         "learning_root_id": state["learning_root_id"],
         "day": day,
         "order": order,
         "name": name,
-    }
-
-
-def source_marker(
-    state: dict, day_dir: Path, root: Path, source: Path, target: Path, order: int, label: str
-) -> dict:
-    return {
-        "kind": "source-code-learning-source",
-        "marker_version": 1,
-        "schema_version": 2,
-        "learning_root_id": state["learning_root_id"],
-        "stage_id": day_dir.relative_to(root).as_posix(),
-        "canonical_source_path": str(source.resolve()),
-        "relative_learning_dir": target.relative_to(root).as_posix(),
-        "order": order,
-        "label": label,
     }
 
 
@@ -189,31 +173,9 @@ class WorkspaceCliTests(unittest.TestCase):
     def run_state_command(self, command: str, root: Path, *args: str, ok: bool = True):
         return self.run_cli(command, "--learning-root", str(root), *args, ok=ok)
 
-    def day_dir(self, root: Path) -> Path:
-        state = self.read_state(root)
-        current_day = state["current"]["day"]
-        self.assertIsNotNone(current_day, "no active Day")
-        return root / state["days"][current_day - 1]["path"] if "path" in state["days"][current_day - 1] else root / f"Day{current_day:0{max(2, len(str(state['route_days'])))}d}"
-
     def begin_chain(self, root: Path, day: int, name: str, ok: bool = True):
         return self.run_state_command(
             "begin-chain", root, "--day", str(day), "--name", name, ok=ok
-        )
-
-    def add_source(
-        self, root: Path, source: Path, *extra_args: str, day_dir: Path | None = None,
-        ok: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        if day_dir is None:
-            day_dir = self.day_dir(root)
-        return self.run_cli(
-            "add-source",
-            "--day-dir",
-            str(day_dir),
-            "--source",
-            str(source),
-            *extra_args,
-            ok=ok,
         )
 
     def register_artifact(
@@ -279,13 +241,12 @@ class WorkspaceCliTests(unittest.TestCase):
 
         self.run_state_command("start-day", root, "--day", "1")
         day_dir = root / "Day01"
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
+        chain_dir = Path(self.begin_chain(root, 1, "入口分析").stdout.strip())
 
-        self.assertIn(
-            "真实源码路径", (source_dir / "源码导读.md").read_text(encoding="utf-8")
-        )
+        brief = (chain_dir / "链说明.md").read_text(encoding="utf-8")
+        self.assertIn("源码入口", brief)
+        self.assertIn("本链调用链树", brief)
+        self.assertNotIn("{{", brief)
         self.assertIn(
             "用户问题", (day_dir / "问题与解答.md").read_text(encoding="utf-8")
         )
@@ -293,16 +254,15 @@ class WorkspaceCliTests(unittest.TestCase):
             "已闭环流程", (day_dir / "当日总结.md").read_text(encoding="utf-8")
         )
         overview = day_dir / "当日总览产物" / "当日统一总结.md"
-        self.assertIn("整体框架联系", overview.read_text(encoding="utf-8"))
-
-        for text in (
-            (source_dir / "源码导读.md").read_text(encoding="utf-8"),
-            overview.read_text(encoding="utf-8"),
-        ):
-            self.assertEqual(
-                text.count("<!-- learning-coach:artifacts:start -->"), 1
-            )
-            self.assertEqual(text.count("<!-- learning-coach:artifacts:end -->"), 1)
+        overview_text = overview.read_text(encoding="utf-8")
+        self.assertIn("整体框架联系", overview_text)
+        self.assertEqual(
+            overview_text.count("<!-- learning-coach:artifacts:start -->"), 1
+        )
+        self.assertEqual(
+            overview_text.count("<!-- learning-coach:artifacts:end -->"), 1
+        )
+        self.assertNotIn("<!-- learning-coach:artifacts:start -->", brief)
 
     def test_template_unknown_token_fails_before_creating_output(self) -> None:
         module = load_cli_module()
@@ -424,23 +384,25 @@ class WorkspaceCliTests(unittest.TestCase):
             "--day",
             "1",
         )
-        source_result = self.run_cli_from(
+        chain_result = self.run_cli_from(
             unrelated,
-            "add-source",
-            "--day-dir",
-            str(root / "Day01"),
-            "--source",
-            str(self.repo / "src" / "main.py"),
+            "begin-chain",
+            "--learning-root",
+            str(root),
+            "--day",
+            "1",
+            "--name",
+            "入口分析",
         )
 
         self.assertIn(
-            "真实源码路径",
-            (Path(source_result.stdout.strip()) / "源码导读.md").read_text(
+            "源码入口",
+            (Path(chain_result.stdout.strip()) / "链说明.md").read_text(
                 encoding="utf-8"
             ),
         )
 
-    def test_missing_templates_leave_no_half_workspace_or_source(self) -> None:
+    def test_missing_templates_leave_no_half_workspace_or_chain(self) -> None:
         module = load_cli_module()
         missing_templates = self.base / "missing-templates"
         missing_templates.mkdir()
@@ -456,23 +418,27 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertFalse(final_root.exists())
         self.assert_no_temp_workspace(final_root)
 
-        root = self.init_workspace("--project-name", "missing-source-template")
+        root = self.init_workspace("--project-name", "missing-chain-template")
         self.run_state_command("start-day", root, "--day", "1")
         day_dir = root / "Day01"
         before_json = self.state_path(root).read_bytes()
         with mock.patch.object(module, "TEMPLATE_ROOT", missing_templates):
             with self.assertRaisesRegex(module.WorkspaceError, "template"):
-                module.command_add_source(
+                module.command_begin_chain(
                     SimpleNamespace(
-                        day_dir=str(day_dir),
-                        source=str(self.repo / "src" / "main.py"),
-                        label=None,
+                        learning_root=str(root), day=1, name="主线"
                     )
                 )
-        self.assertFalse((day_dir / "01-main.py").exists())
+        self.assertFalse((day_dir / "01-主线").exists())
+        self.assertFalse(
+            any(
+                path.name.startswith(".01-主线.tmp-")
+                for path in day_dir.iterdir()
+            )
+        )
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
 
-    def test_unknown_tokens_leave_no_half_workspace_or_source(self) -> None:
+    def test_unknown_tokens_leave_no_half_workspace_or_chain(self) -> None:
         module = load_cli_module()
         real_templates = SKILL_ROOT / "assets" / "templates"
         poisoned = self.base / "poisoned-templates"
@@ -493,26 +459,30 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertFalse(final_root.exists())
         self.assert_no_temp_workspace(final_root)
 
-        root = self.init_workspace("--project-name", "unknown-source-token")
+        root = self.init_workspace("--project-name", "unknown-chain-token")
         self.run_state_command("start-day", root, "--day", "1")
         day_dir = root / "Day01"
-        source_template = poisoned / "source-guide.md"
-        source_template.write_text(
-            (real_templates / "source-guide.md").read_text(encoding="utf-8")
+        chain_template = poisoned / "chain-brief.md"
+        chain_template.write_text(
+            (real_templates / "chain-brief.md").read_text(encoding="utf-8")
             + "{{UNKNOWN}}\n",
             encoding="utf-8",
         )
         before_json = self.state_path(root).read_bytes()
         with mock.patch.object(module, "TEMPLATE_ROOT", poisoned):
             with self.assertRaisesRegex(module.WorkspaceError, "UNKNOWN"):
-                module.command_add_source(
+                module.command_begin_chain(
                     SimpleNamespace(
-                        day_dir=str(day_dir),
-                        source=str(self.repo / "src" / "main.py"),
-                        label=None,
+                        learning_root=str(root), day=1, name="主线"
                     )
                 )
-        self.assertFalse((day_dir / "01-main.py").exists())
+        self.assertFalse((day_dir / "01-主线").exists())
+        self.assertFalse(
+            any(
+                path.name.startswith(".01-主线.tmp-")
+                for path in day_dir.iterdir()
+            )
+        )
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
 
     def test_init_rejects_invalid_roadmaps_without_partial_root(self) -> None:
@@ -579,8 +549,9 @@ class WorkspaceCliTests(unittest.TestCase):
         state = json.loads((root / "学习状态.json").read_text(encoding="utf-8"))
         self.assertNotIn("stage_ranges", state)
         self.assertNotIn("stages", state)
+        self.assertNotIn("sources", state)
         self.assertEqual(state["chains"], [])
-        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["schema_version"], 3)
 
     def test_init_does_not_modify_existing_target(self) -> None:
         root = self.base / "demo-project-2天学习路线"
@@ -817,7 +788,7 @@ class WorkspaceCliTests(unittest.TestCase):
             (learning_root / ".learning-root.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["schema_version"], 3)
         self.assertEqual(str(uuid.UUID(state["learning_root_id"])), state["learning_root_id"])
         self.assertEqual(marker["learning_root_id"], state["learning_root_id"])
         self.assertEqual(Path(state["learning_root"]), learning_root.resolve())
@@ -830,7 +801,7 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertEqual(state["current"]["resume_marker"], "")
         self.assertEqual(state["current"]["closed_flows"], [])
         self.assertEqual(state["chains"], [])
-        self.assertEqual(state["sources"], [])
+        self.assertNotIn("sources", state)
         self.assertEqual(state["artifacts"], [])
         self.assertEqual(state["history"], [])
         self.assertTrue(state["updated_at"].endswith("Z"))
@@ -881,13 +852,16 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertTrue(created.is_dir())
         self.assertTrue((created / "链说明.md").is_file())
         self.assertTrue((created / "产物").is_dir())
+        self.assertIn(
+            "源码入口", (created / "链说明.md").read_text(encoding="utf-8")
+        )
         marker = json.loads((created / ".learning-chain.json").read_text(encoding="utf-8"))
         self.assertEqual(
             marker,
             {
                 "kind": "source-code-learning-chain",
                 "marker_version": 1,
-                "schema_version": 2,
+                "schema_version": 3,
                 "learning_root_id": self.read_state(root)["learning_root_id"],
                 "day": 1,
                 "order": 1,
@@ -1555,7 +1529,6 @@ class WorkspaceCliTests(unittest.TestCase):
                 "last_source", str(external)
             ),
             "history object": lambda state: state.__setitem__("history", {}),
-            "sources object": lambda state: state.__setitem__("sources", {}),
             "artifacts object": lambda state: state.__setitem__("artifacts", {}),
             "closed flows object": lambda state: state["current"].__setitem__(
                 "closed_flows", {}
@@ -1586,7 +1559,6 @@ class WorkspaceCliTests(unittest.TestCase):
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         marker.pop("repository")
         marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
-        day_dir = root / "Day01"
         source = self.repo / "src" / "main.py"
         commands = (
             ("start-day", ("--learning-root", str(root), "--day", "1")),
@@ -1616,10 +1588,7 @@ class WorkspaceCliTests(unittest.TestCase):
                     "entry",
                 ),
             ),
-            (
-                "add-source",
-                ("--day-dir", str(day_dir), "--source", str(source)),
-            ),
+            ("begin-chain", ("--learning-root", str(root), "--day", "1", "--name", "主线")),
             ("complete-day", ("--learning-root", str(root), "--day", "1")),
             ("sync-state", ("--learning-root", str(root))),
         )
@@ -1646,162 +1615,14 @@ class WorkspaceCliTests(unittest.TestCase):
             module.render_state(self.read_state(root)),
         )
 
-    def test_add_source_is_ordered_and_idempotent_with_json_identity(self) -> None:
-        second_source = self.repo / "src" / "service.py"
-        second_source.write_text("def serve():\n    return 'ok'\n", encoding="utf-8")
-        self.repo_hash = tree_hash(self.repo)
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        first_source = self.repo / "src" / "main.py"
-
-        first = self.add_source(root, first_source, day_dir=day_dir)
-        again = self.add_source(root, first_source, day_dir=day_dir)
-        second = self.add_source(root, second_source, day_dir=day_dir)
-
-        first_dir = Path(first.stdout.strip())
-        second_dir = Path(second.stdout.strip())
-        self.assertEqual(first.stdout.strip(), again.stdout.strip())
-        self.assertEqual(first_dir.name, "01-main.py")
-        self.assertEqual(second_dir.name, "02-service.py")
-        self.assertTrue((first_dir / "源码导读.md").is_file())
-        self.assertTrue((first_dir / "产物").is_dir())
-        self.assertTrue((first_dir / ".learning-source.json").is_file())
-        state = self.read_state(root)
-        self.assertEqual(len(state["sources"]), 2)
-        self.assertEqual([entry["order"] for entry in state["sources"]], [1, 2])
-        self.assertEqual(
-            [entry["day"] for entry in state["sources"]],
-            [1, 1],
-        )
-        self.assertEqual(
-            [entry["canonical_source_path"] for entry in state["sources"]],
-            [str(first_source.resolve()), str(second_source.resolve())],
-        )
-        self.assertEqual(
-            [entry["relative_learning_dir"] for entry in state["sources"]],
-            ["Day01/01-main.py", "Day01/02-service.py"],
-        )
-
-    def test_same_basename_uses_stable_parent_path_suffix(self) -> None:
-        tests_directory = self.repo / "tests"
-        tests_directory.mkdir()
-        other_main = tests_directory / "main.py"
-        other_main.write_text("print('test entry')\n", encoding="utf-8")
-        self.repo_hash = tree_hash(self.repo)
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-
-        first = self.add_source(root, self.repo / "src" / "main.py")
-        second = self.add_source(root, other_main)
-
-        self.assertEqual(Path(first.stdout.strip()).name, "01-main.py")
-        self.assertEqual(Path(second.stdout.strip()).name, "02-main-tests.py")
-
-    def test_same_basename_parent_suffix_collision_uses_stable_path_hash(self) -> None:
-        flat_parent = self.repo / "foo-bar"
-        nested_parent = self.repo / "foo" / "bar"
-        flat_parent.mkdir()
-        nested_parent.mkdir(parents=True)
-        flat_source = flat_parent / "main.py"
-        nested_source = nested_parent / "main.py"
-        flat_source.write_text("print('flat')\n", encoding="utf-8")
-        nested_source.write_text("print('nested')\n", encoding="utf-8")
-        self.repo_hash = tree_hash(self.repo)
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-
-        first = self.add_source(root, self.repo / "src" / "main.py")
-        second = self.add_source(root, flat_source)
-        third = self.add_source(root, nested_source)
-
-        stable = hashlib.sha256(b"foo/bar/main.py").hexdigest()[:8]
-        self.assertEqual(Path(first.stdout.strip()).name, "01-main.py")
-        self.assertEqual(Path(second.stdout.strip()).name, "02-main-foo-bar.py")
-        self.assertEqual(
-            Path(third.stdout.strip()).name,
-            f"03-main-foo-bar-{stable}.py",
-        )
-
-    def test_add_source_rejects_external_escape_and_unsafe_label_without_writes(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        external = self.base / "external.py"
-        external.write_text("outside\n", encoding="utf-8")
-        before_json = self.state_path(root).read_bytes()
-        before_day = tree_hash(day_dir)
-        outside_candidate = day_dir.parent / "escape"
-        cases = (
-            (external, ()),
-            (self.repo / "src" / "main.py", ("--label", "../escape")),
-            (self.repo / "src" / "main.py", ("--label", ".")),
-            (self.repo / "src" / "main.py", ("--label", "bad/name")),
-            (self.repo / "src" / "main.py", ("--label", "bad\nname")),
-        )
-        for source, arguments in cases:
-            with self.subTest(source=source, arguments=arguments):
-                self.add_source(root, source, *arguments, day_dir=day_dir, ok=False)
-                self.assertEqual(self.state_path(root).read_bytes(), before_json)
-                self.assertEqual(tree_hash(day_dir), before_day)
-                self.assertFalse(outside_candidate.exists())
-
-    def test_add_source_rejects_non_active_day_dir(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-summary")
-        self.run_state_command("complete-day", root, "--day", "1")
-        day01 = root / "Day01"
-        before_json = self.state_path(root).read_bytes()
-        before_day = tree_hash(day01)
-
-        result = self.add_source(
-            root,
-            self.repo / "src" / "main.py",
-            "--label",
-            "again.py",
-            day_dir=day01,
-            ok=False,
-        )
-
-        self.assertIn("active", result.stderr)
-        self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(day01), before_day)
-
-    def test_add_source_rejects_pending_day_dir(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        pending_day = root / "Day02"
-        before_json = self.state_path(root).read_bytes()
-        before_day = tree_hash(pending_day)
-
-        result = self.add_source(
-            root,
-            self.repo / "src" / "main.py",
-            day_dir=pending_day,
-            ok=False,
-        )
-
-        self.assertIn("active", result.stderr)
-        self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(pending_day), before_day)
-
-    def test_add_source_rejects_copied_or_forged_learning_root(self) -> None:
+    def test_copied_or_forged_learning_root_is_rejected_by_state_commands(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
         copied_root = self.base / "copied-learning-root"
         shutil.copytree(root, copied_root)
-        copied_day = copied_root / "Day01"
         before_copy = tree_hash(copied_root)
 
-        copied = self.add_source(
-            copied_root,
-            self.repo / "src" / "main.py",
-            day_dir=copied_day,
-            ok=False,
-        )
+        copied = self.run_state_command("sync-state", copied_root, ok=False)
 
         self.assertIn("learning-root", copied.stderr)
         self.assertEqual(tree_hash(copied_root), before_copy)
@@ -1810,12 +1631,7 @@ class WorkspaceCliTests(unittest.TestCase):
         state["learning_root"] = str(copied_root.resolve())
         self.state_path(root).write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         before_forged = tree_hash(root)
-        forged = self.add_source(
-            root,
-            self.repo / "src" / "main.py",
-            day_dir=root / "Day01",
-            ok=False,
-        )
+        forged = self.run_state_command("sync-state", root, ok=False)
         self.assertIn("learning-root", forged.stderr)
         self.assertEqual(tree_hash(root), before_forged)
 
@@ -1850,12 +1666,7 @@ class WorkspaceCliTests(unittest.TestCase):
             )
             marker_path.write_text(json.dumps(marker), encoding="utf-8")
             before_root = tree_hash(root_inside)
-            result = self.add_source(
-                root_inside,
-                moved_repo / "main.py",
-                day_dir=root_inside / "Day01",
-                ok=False,
-            )
+            result = self.run_state_command("sync-state", root_inside, ok=False)
             self.assertIn("sibling", result.stderr)
             self.assertEqual(tree_hash(root_inside), before_root)
 
@@ -1880,38 +1691,20 @@ class WorkspaceCliTests(unittest.TestCase):
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             marker_path.write_text(json.dumps(marker), encoding="utf-8")
             before_nested = tree_hash(nested_root)
-            result = self.add_source(
-                nested_root,
-                repo_outer / "main.py",
-                day_dir=nested_root / "Day01",
-                ok=False,
-            )
+            result = self.run_state_command("sync-state", nested_root, ok=False)
             self.assertIn("sibling", result.stderr)
             self.assertEqual(tree_hash(nested_root), before_nested)
 
-    def test_symlink_escapes_are_rejected_for_day_add_source_and_resume(self) -> None:
+    def test_symlinked_resume_source_is_rejected_without_writes(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        external_directory = self.base / "external-day"
-        external_directory.mkdir()
-        sentinel = external_directory / "sentinel.bin"
-        sentinel.write_bytes(b"outside")
-        day_link = root / "day-link"
-        day_link.symlink_to(external_directory, target_is_directory=True)
         external_source = self.base / "external-source.py"
         external_source.write_text("outside\n", encoding="utf-8")
         source_link = self.repo / "src" / "escape.py"
         source_link.symlink_to(external_source)
         self.repo_hash = tree_hash(self.repo)
         before_json = self.state_path(root).read_bytes()
-        before_external = tree_hash(external_directory)
         try:
-            day_result = self.add_source(
-                root, self.repo / "src" / "main.py", day_dir=day_link, ok=False
-            )
-            self.assertIn("symlink", day_result.stderr.lower())
-            source_result = self.add_source(root, source_link, ok=False)
-            self.assertIn("repository", source_result.stderr)
             resume_result = self.run_state_command(
                 "set-resume",
                 root,
@@ -1923,36 +1716,11 @@ class WorkspaceCliTests(unittest.TestCase):
             )
             self.assertIn("repository", resume_result.stderr)
             self.assertEqual(self.state_path(root).read_bytes(), before_json)
-            self.assertEqual(tree_hash(external_directory), before_external)
-            self.assertEqual(sentinel.read_bytes(), b"outside")
         finally:
             source_link.unlink(missing_ok=True)
             self.repo_hash = tree_hash(self.repo)
 
-    def test_add_source_precommit_failure_removes_only_generated_directory(self) -> None:
-        module = load_cli_module()
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        before_json = self.state_path(root).read_bytes()
-        before_day = tree_hash(day_dir)
-        target = day_dir / "01-main.py"
-
-        with mock.patch.object(
-            module, "replace_authority_json", side_effect=OSError("authority failed")
-        ):
-            with self.assertRaises(OSError):
-                module.command_add_source(
-                    SimpleNamespace(
-                        day_dir=str(day_dir), source=str(self.repo / "src" / "main.py"), label=None
-                    )
-                )
-
-        self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(day_dir), before_day)
-        self.assertFalse(target.exists())
-
-    def test_add_source_day_swap_race_never_writes_through_external_symlink(self) -> None:
+    def test_begin_chain_day_swap_race_never_writes_through_external_symlink(self) -> None:
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
@@ -1965,21 +1733,22 @@ class WorkspaceCliTests(unittest.TestCase):
         before_json = self.state_path(root).read_bytes()
         before_day = tree_hash(day_dir)
         before_external = tree_hash(external)
+        native_prepare = module._prepare_chain_target
 
-        def swap_day(_day: Path) -> None:
+        def swap_day(root_arg, state, day, order, name):
+            target = native_prepare(root_arg, state, day, order, name)
             day_dir.rename(held_day)
             day_dir.symlink_to(external, target_is_directory=True)
+            return target
 
         try:
             with mock.patch.object(
-                module, "source_creation_seam", side_effect=swap_day
+                module, "_prepare_chain_target", side_effect=swap_day
             ):
                 with self.assertRaises(module.WorkspaceError):
-                    module.command_add_source(
+                    module.command_begin_chain(
                         SimpleNamespace(
-                            day_dir=str(day_dir),
-                            source=str(self.repo / "src" / "main.py"),
-                            label=None,
+                            learning_root=str(root), day=1, name="主线"
                         )
                     )
         finally:
@@ -1992,200 +1761,10 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertEqual(tree_hash(day_dir), before_day)
         self.assertEqual(tree_hash(external), before_external)
         self.assertEqual(sentinel.read_bytes(), b"user-owned")
-        self.assertFalse(any(path.name.startswith(".01-main.py.tmp-") for path in external.iterdir()))
-        self.assertFalse((external / "01-main.py").exists())
-
-    def test_add_source_fails_closed_when_dir_fd_operations_are_unavailable(self) -> None:
-        module = load_cli_module()
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        before_json = self.state_path(root).read_bytes()
-        before_day = tree_hash(day_dir)
-
-        with mock.patch.object(module.os, "supports_dir_fd", set()):
-            with self.assertRaisesRegex(module.WorkspaceError, "dir_fd"):
-                module.command_add_source(
-                    SimpleNamespace(
-                        day_dir=str(day_dir),
-                        source=str(self.repo / "src" / "main.py"),
-                        label=None,
-                    )
-                )
-
-        self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(day_dir), before_day)
-
-    def test_temp_cleanup_preserves_replacement_when_temp_name_identity_changes(self) -> None:
-        module = load_cli_module()
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        moved_temp = day_dir / ".moved-generated-temp"
-        before_json = self.state_path(root).read_bytes()
-        replacement_name: list[str] = []
-
-        def replace_temp(day_fd: int, temp_name: str, temp_fd: int) -> None:
-            del temp_fd
-            os.rename(
-                temp_name,
-                moved_temp.name,
-                src_dir_fd=day_fd,
-                dst_dir_fd=day_fd,
-            )
-            os.mkdir(temp_name, dir_fd=day_fd)
-            replacement_name.append(temp_name)
-            (day_dir / temp_name / "USER-DATA").write_bytes(b"preserve replacement")
-            raise OSError("injected write failure after temp replacement")
-
-        with mock.patch.object(
-            module, "source_temp_creation_seam", side_effect=replace_temp
-        ):
-            with self.assertRaisesRegex(module.WorkspaceError, "residue"):
-                module.command_add_source(
-                    SimpleNamespace(
-                        day_dir=str(day_dir),
-                        source=str(self.repo / "src" / "main.py"),
-                        label=None,
-                    )
-                )
-
-        replacement = day_dir / replacement_name[0]
-        self.assertEqual((replacement / "USER-DATA").read_bytes(), b"preserve replacement")
-        self.assertTrue(moved_temp.is_dir())
-        self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertFalse((day_dir / "01-main.py").exists())
-
-    def test_precommit_cleanup_preserves_replacement_with_forged_exact_marker(self) -> None:
-        module = load_cli_module()
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        target = day_dir / "01-main.py"
-        moved_generated = day_dir / ".moved-generated-source"
-        before_json = self.state_path(root).read_bytes()
-
-        def replace_published_then_fail(path: Path, content: str) -> None:
-            del path, content
-            target.rename(moved_generated)
-            target.mkdir()
-            shutil.copyfile(
-                moved_generated / ".learning-source.json",
-                target / ".learning-source.json",
-            )
-            (target / "USER-DATA").write_bytes(b"preserve forged replacement")
-            raise OSError("injected authority failure after replacement")
-
-        with mock.patch.object(
-            module,
-            "replace_authority_json",
-            side_effect=replace_published_then_fail,
-        ):
-            with self.assertRaisesRegex(module.WorkspaceError, "residue"):
-                module.command_add_source(
-                    SimpleNamespace(
-                        day_dir=str(day_dir),
-                        source=str(self.repo / "src" / "main.py"),
-                        label=None,
-                    )
-                )
-
-        self.assertEqual((target / "USER-DATA").read_bytes(), b"preserve forged replacement")
-        self.assertTrue(moved_generated.is_dir())
-        self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(self.read_state(root)["sources"], [])
-
-    def test_add_source_retry_cleans_matching_residue_but_preserves_foreign_target(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        source = self.repo / "src" / "main.py"
-        target = day_dir / "01-main.py"
-        state = self.read_state(root)
-        target.mkdir()
-        (target / ".learning-source.json").write_text(
-            json.dumps(source_marker(state, day_dir, root, source, target, 1, "main.py")),
-            encoding="utf-8",
+        self.assertFalse(
+            any(path.name.startswith(".01-主线.tmp-") for path in external.iterdir())
         )
-        (target / "stale.bin").write_bytes(b"generated residue")
-
-        result = self.add_source(root, source, day_dir=day_dir)
-
-        self.assertEqual(Path(result.stdout.strip()), target)
-        self.assertFalse((target / "stale.bin").exists())
-        self.assertEqual(len(self.read_state(root)["sources"]), 1)
-
-        second_root = self.init_workspace("--project-name", "foreign-source-target")
-        self.run_state_command("start-day", second_root, "--day", "1")
-        second_day = second_root / "Day01"
-        foreign = second_day / "01-main.py"
-        foreign.mkdir()
-        sentinel = foreign / "sentinel.bin"
-        sentinel.write_bytes(b"do-not-delete")
-        forged_state = self.read_state(second_root)
-        forged_marker = source_marker(
-            forged_state, second_day, second_root, source, foreign, 1, "main.py"
-        )
-        forged_marker["learning_root_id"] = str(uuid.uuid4())
-        (foreign / ".learning-source.json").write_text(
-            json.dumps(forged_marker), encoding="utf-8"
-        )
-        before_json = self.state_path(second_root).read_bytes()
-
-        failed = self.add_source(second_root, source, day_dir=second_day, ok=False)
-
-        self.assertIn("unknown", failed.stderr)
-        self.assertEqual(sentinel.read_bytes(), b"do-not-delete")
-        self.assertEqual(self.state_path(second_root).read_bytes(), before_json)
-
-    def test_same_source_readded_in_same_day_returns_existing_dir(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        source = self.repo / "src" / "main.py"
-        first = self.add_source(root, source, day_dir=day_dir)
-        first_dir = Path(first.stdout.strip())
-
-        second = self.add_source(root, source, day_dir=day_dir, ok=True)
-
-        self.assertEqual(second.stdout.strip(), first.stdout.strip())
-        self.assertEqual(len(self.read_state(root)["sources"]), 1)
-
-    def test_forged_source_records_are_rejected_without_projection_writes(self) -> None:
-        mutators = {
-            "duplicate identity": lambda state: state["sources"].append(
-                copy.deepcopy(state["sources"][0])
-            ),
-            "wrong day": lambda state: state["sources"][0].__setitem__(
-                "day", 2
-            ),
-            "external canonical source": lambda state: state["sources"][0].__setitem__(
-                "canonical_source_path", str((self.base / "external.py").resolve())
-            ),
-            "escaping learning directory": lambda state: state["sources"][0].__setitem__(
-                "relative_learning_dir", "../escape"
-            ),
-            "missing creation timestamp": lambda state: state["sources"][0].pop(
-                "created_at"
-            ),
-        }
-        (self.base / "external.py").write_text("outside\n", encoding="utf-8")
-        for index, (label, mutate) in enumerate(mutators.items(), start=1):
-            with self.subTest(label=label):
-                root = self.init_workspace("--project-name", f"source-forgery-{index}")
-                self.run_state_command("start-day", root, "--day", "1")
-                self.add_source(root, self.repo / "src" / "main.py")
-                state = self.read_state(root)
-                mutate(state)
-                self.state_path(root).write_text(
-                    json.dumps(state, ensure_ascii=False), encoding="utf-8"
-                )
-                before_tree = tree_hash(root)
-
-                result = self.run_state_command("sync-state", root, ok=False)
-
-                self.assertNotIn("Traceback", result.stderr)
-                self.assertEqual(tree_hash(root), before_tree)
+        self.assertFalse((external / "01-主线").exists())
 
     def test_sealed_chain_corruption_is_rejected_by_every_state_command(self) -> None:
         source = self.repo / "src" / "main.py"
@@ -2221,33 +1800,17 @@ class WorkspaceCliTests(unittest.TestCase):
                     ),
                     ("set-resume", ("--source", str(source), "--marker", "entry")),
                     ("complete-day", ("--day", "1")),
-                    (
-                        "add-source",
-                        (
-                            "--day-dir",
-                            str(root / "Day01"),
-                            "--source",
-                            str(source),
-                        ),
-                    ),
                 )
                 for command, arguments in commands:
                     with self.subTest(corruption=corruption, command=command):
-                        if command == "add-source":
-                            result = self.run_cli(command, *arguments, ok=False)
-                        else:
-                            result = self.run_state_command(
-                                command, root, *arguments, ok=False
-                            )
+                        result = self.run_state_command(
+                            command, root, *arguments, ok=False
+                        )
                         self.assertIn("chain", result.stderr.lower())
                         self.assertNotIn("Traceback", result.stderr)
                         self.assertEqual(tree_hash(root), before_tree)
                         if external_hash is not None:
                             self.assertEqual(tree_hash(external), external_hash)
-
-    def test_add_source_help_exits_zero(self) -> None:
-        result = self.run_cli("add-source", "--help")
-        self.assertEqual(result.returncode, 0)
 
     def test_implemented_command_help_exits_zero(self) -> None:
         root_help = self.run_cli("--help")
@@ -2266,52 +1829,51 @@ class WorkspaceCliTests(unittest.TestCase):
                 result = self.run_cli(command, "--help")
                 self.assertEqual(result.returncode, 0)
 
-    def test_help_lists_begin_chain_and_day_dir_flag(self) -> None:
+    def test_help_lists_state_commands_without_add_source(self) -> None:
         root_help = self.run_cli("--help")
         self.assertIn("begin-chain", root_help.stdout)
+        self.assertIn("set-resume", root_help.stdout)
         self.assertIn("register-artifact", root_help.stdout)
-        self.assertIn("add-source", root_help.stdout)
+        self.assertNotIn("add-source", root_help.stdout)
 
-        add_source_help = self.run_cli("add-source", "--help")
-        self.assertEqual(add_source_help.returncode, 0)
-        self.assertIn("--day-dir", add_source_help.stdout)
-        self.assertIn("--label", add_source_help.stdout)
+        self.run_cli("add-source", "--help", ok=False)
 
         begin_chain_help = self.run_cli("begin-chain", "--help")
         self.assertEqual(begin_chain_help.returncode, 0)
         self.assertIn("--day", begin_chain_help.stdout)
         self.assertIn("--name", begin_chain_help.stdout)
 
-    def test_register_source_artifact_records_and_projects_idempotently(self) -> None:
+        set_resume_help = self.run_cli("set-resume", "--help")
+        self.assertEqual(set_resume_help.returncode, 0)
+        self.assertIn("--source", set_resume_help.stdout)
+        self.assertIn("--marker", set_resume_help.stdout)
+
+    def test_register_day_overview_artifact_records_and_projects_idempotently(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "entry-sequence.html"
-        artifact.write_text("<html>source flow</html>\n", encoding="utf-8")
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "entry-sequence.html"
+        artifact.write_text("<html>day flow</html>\n", encoding="utf-8")
 
-        first = self.register_artifact(root, "source", source_dir, artifact)
+        first = self.register_artifact(root, "day-overview", overview, artifact)
         self.assertEqual(Path(first.stdout.strip()), artifact.resolve())
         first_state = self.read_state(root)
         self.assertEqual(len(first_state["artifacts"]), 1)
         record = first_state["artifacts"][0]
         self.assertEqual(record["canonical_artifact_path"], str(artifact.resolve()))
-        self.assertEqual(record["owner_id"], f"source:{source_dir.relative_to(root).as_posix()}")
-        self.assertEqual(record["owner_kind"], "source")
-        self.assertEqual(record["relative_owner_dir"], source_dir.relative_to(root).as_posix())
-        self.assertEqual(record["relative_artifact_path"], "产物/entry-sequence.html")
-        guide = source_dir / "源码导读.md"
-        projected = guide.read_text(encoding="utf-8")
-        self.assertIn("`产物/entry-sequence.html`", projected)
-        self.assertEqual(projected.count("产物/entry-sequence.html"), 1)
+        self.assertEqual(record["owner_id"], "day-overview:1")
+        self.assertEqual(record["owner_kind"], "day-overview")
+        self.assertEqual(record["relative_owner_dir"], "Day01/当日总览产物")
+        self.assertEqual(record["relative_artifact_path"], "entry-sequence.html")
+        summary = overview / "当日统一总结.md"
+        projected = summary.read_text(encoding="utf-8")
+        self.assertIn("`entry-sequence.html`", projected)
+        self.assertEqual(projected.count("entry-sequence.html"), 1)
 
-        self.register_artifact(root, "source", source_dir, artifact)
+        self.register_artifact(root, "day-overview", overview, artifact)
         self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
         self.assertEqual(
-            (source_dir / "源码导读.md").read_text(encoding="utf-8").count(
-                "产物/entry-sequence.html"
-            ),
+            summary.read_text(encoding="utf-8").count("entry-sequence.html"),
             1,
         )
 
@@ -2356,48 +1918,47 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_register_artifact_rejects_unsafe_owner_and_artifact_inputs(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact_dir = source_dir / "产物"
-        valid = artifact_dir / "valid.html"
+        overview = root / "Day01" / "当日总览产物"
+        valid = overview / "valid.html"
         valid.write_text("ok\n", encoding="utf-8")
         outside = self.base / "outside.html"
         outside.write_text("outside\n", encoding="utf-8")
-        directory = artifact_dir / "not-a-file"
+        directory = overview / "not-a-file"
         directory.mkdir()
-        artifact_link = artifact_dir / "escape.html"
+        artifact_link = overview / "escape.html"
         artifact_link.symlink_to(outside)
         owner_link = self.base / "owner-link"
-        owner_link.symlink_to(source_dir, target_is_directory=True)
-        unregistered = root / "Day01" / "99-unregistered"
-        unregistered.mkdir()
+        owner_link.symlink_to(overview, target_is_directory=True)
+        pending_overview = root / "Day02" / "当日总览产物"
+        pending_overview.mkdir()
+        pending_artifact = pending_overview / "pending.html"
+        pending_artifact.write_text("pending\n", encoding="utf-8")
+        forged_chain_artifacts = root / "Day01" / "99-伪造链" / "产物"
+        forged_chain_artifacts.mkdir(parents=True)
+        forged_artifact = forged_chain_artifacts / "x.html"
+        forged_artifact.write_text("x\n", encoding="utf-8")
         before = self.state_path(root).read_bytes()
 
         cases = (
-            ("source", owner_link, valid),
-            ("source", source_dir / ".." / source_dir.name, valid),
-            ("source", source_dir, outside),
-            ("source", source_dir, artifact_link),
-            ("source", source_dir, directory),
-            ("source", unregistered, valid),
-            ("day-overview", source_dir, valid),
+            ("day-overview", owner_link, valid),
+            ("day-overview", overview / ".." / "当日总览产物", valid),
+            ("day-overview", overview, outside),
+            ("day-overview", overview, artifact_link),
+            ("day-overview", overview, directory),
+            ("day-overview", pending_overview, pending_artifact),
+            ("chain", overview, valid),
+            ("chain", forged_chain_artifacts, forged_artifact),
+            ("source", overview, valid),
         )
         for owner_kind, owner, artifact in cases:
             with self.subTest(owner_kind=owner_kind, owner=owner, artifact=artifact):
                 self.register_artifact(root, owner_kind, owner, artifact, ok=False)
                 self.assertEqual(self.state_path(root).read_bytes(), before)
 
-    def test_register_artifact_rejects_sealed_source_and_day_owner(self) -> None:
+    def test_register_artifact_rejects_completed_day_overview_owner(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        source_artifact = source_dir / "产物" / "sealed.html"
-        source_artifact.write_text("sealed\n", encoding="utf-8")
-        overview = day_dir / "当日总览产物"
+        overview = root / "Day01" / "当日总览产物"
         day_artifact = overview / "sealed.svg"
         day_artifact.write_text("sealed\n", encoding="utf-8")
         for cp in ("d1-entry", "d1-flow", "d1-summary"):
@@ -2405,7 +1966,6 @@ class WorkspaceCliTests(unittest.TestCase):
         self.run_state_command("complete-day", root, "--day", "1")
 
         before = self.state_path(root).read_bytes()
-        self.register_artifact(root, "source", source_dir, source_artifact, ok=False)
         self.register_artifact(root, "day-overview", overview, day_artifact, ok=False)
         self.assertEqual(self.state_path(root).read_bytes(), before)
 
@@ -2440,43 +2000,40 @@ class WorkspaceCliTests(unittest.TestCase):
 
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "diagram.html"
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "diagram.html"
         artifact.write_text("diagram\n", encoding="utf-8")
-        guide = source_dir / "源码导读.md"
-        guide.write_text("human text without markers\n", encoding="utf-8")
+        summary = overview / "当日统一总结.md"
+        summary.write_text("human text without markers\n", encoding="utf-8")
         before_json = self.state_path(root).read_bytes()
-        before_guide = guide.read_bytes()
+        before_summary = summary.read_bytes()
 
-        self.register_artifact(root, "source", source_dir, artifact, ok=False)
+        self.register_artifact(root, "day-overview", overview, artifact, ok=False)
 
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(guide.read_bytes(), before_guide)
+        self.assertEqual(summary.read_bytes(), before_summary)
 
     def test_register_artifact_transaction_and_retry_repair_projection(self) -> None:
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "sequence.html"
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "sequence.html"
         artifact.write_text("sequence\n", encoding="utf-8")
-        guide = source_dir / "源码导读.md"
-        original = guide.read_text(encoding="utf-8")
+        summary = overview / "当日统一总结.md"
+        original = summary.read_text(encoding="utf-8")
         customized = original.replace(
-            "- 当前理解：待整理", "- 当前理解：人工内容，必须逐字保留"
+            "- 整体框架联系：待整理", "- 整体框架联系：人工内容，必须逐字保留"
         )
-        with guide.open("w", encoding="utf-8", newline="") as handle:
+        self.assertNotEqual(customized, original)
+        with summary.open("w", encoding="utf-8", newline="") as handle:
             handle.write(customized)
         before_json = self.state_path(root).read_bytes()
-        before_guide = guide.read_bytes()
+        before_summary = summary.read_bytes()
         namespace = SimpleNamespace(
             learning_root=str(root),
-            owner_kind="source",
-            owner_dir=str(source_dir),
+            owner_kind="day-overview",
+            owner_dir=str(overview),
             artifact=str(artifact),
         )
 
@@ -2486,7 +2043,7 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 module.command_register_artifact(namespace)
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(guide.read_bytes(), before_guide)
+        self.assertEqual(summary.read_bytes(), before_summary)
         self.assertEqual(self.read_state(root)["artifacts"], [])
 
         with mock.patch.object(
@@ -2495,7 +2052,7 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 module.command_register_artifact(namespace)
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(guide.read_bytes(), before_guide)
+        self.assertEqual(summary.read_bytes(), before_summary)
         self.assertEqual(self.read_state(root)["artifacts"], [])
 
         with mock.patch.object(
@@ -2506,10 +2063,10 @@ class WorkspaceCliTests(unittest.TestCase):
 
         committed = self.read_state(root)
         self.assertEqual(len(committed["artifacts"]), 1)
-        self.assertEqual(guide.read_bytes(), before_guide)
+        self.assertEqual(summary.read_bytes(), before_summary)
 
         module.command_register_artifact(namespace)
-        repaired = guide.read_text(encoding="utf-8")
+        repaired = summary.read_text(encoding="utf-8")
         self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
         self.assertIn("人工内容，必须逐字保留", repaired)
         self.assertEqual(repaired.count("sequence.html"), 1)
@@ -2523,18 +2080,17 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_register_artifact_validation_rejects_duplicate_or_wrong_owner(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "flow.html"
+        self.begin_chain(root, 1, "主线")
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "flow.html"
         artifact.write_text("flow\n", encoding="utf-8")
-        self.register_artifact(root, "source", source_dir, artifact)
+        self.register_artifact(root, "day-overview", overview, artifact)
         state = self.read_state(root)
-        duplicate = copy.deepcopy(state["artifacts"][0])
-        duplicate["owner_id"] = "day-overview:1"
-        duplicate["owner_kind"] = "day-overview"
-        duplicate["relative_owner_dir"] = "Day01/当日总览产物"
-        state["artifacts"].append(duplicate)
+        forged = copy.deepcopy(state["artifacts"][0])
+        forged["owner_id"] = "chain:Day01/01-主线"
+        forged["owner_kind"] = "chain"
+        forged["relative_owner_dir"] = "Day01/01-主线/产物"
+        state["artifacts"].append(forged)
         self.state_path(root).write_text(
             json.dumps(state, ensure_ascii=False), encoding="utf-8"
         )
@@ -2549,38 +2105,36 @@ class WorkspaceCliTests(unittest.TestCase):
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "race.html"
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "race.html"
         artifact.write_text("race\n", encoding="utf-8")
-        guide = source_dir / "源码导读.md"
-        original_guide = guide.read_bytes()
-        outside = self.base / "outside-guide.md"
+        summary = overview / "当日统一总结.md"
+        original_summary = summary.read_bytes()
+        outside = self.base / "outside-summary.md"
         outside.write_bytes(b"outside sentinel")
         namespace = SimpleNamespace(
             learning_root=str(root),
-            owner_kind="source",
-            owner_dir=str(source_dir),
+            owner_kind="day-overview",
+            owner_dir=str(overview),
             artifact=str(artifact),
         )
 
-        def replace_guide_with_symlink(*_args) -> None:
-            guide.unlink()
-            guide.symlink_to(outside)
+        def replace_summary_with_symlink(*_args) -> None:
+            summary.unlink()
+            summary.symlink_to(outside)
 
         with mock.patch.object(
             module,
             "artifact_pre_authority_seam",
-            side_effect=replace_guide_with_symlink,
+            side_effect=replace_summary_with_symlink,
         ):
             with self.assertRaises(module.WorkspaceError):
                 module.command_register_artifact(namespace)
 
         self.assertEqual(outside.read_bytes(), b"outside sentinel")
         self.assertEqual(self.read_state(root)["artifacts"], [])
-        guide.unlink()
-        guide.write_bytes(original_guide)
+        summary.unlink()
+        summary.write_bytes(original_summary)
 
     def test_register_artifact_owner_and_file_swap_races_fail_closed(self) -> None:
         module = load_cli_module()
@@ -2590,20 +2144,19 @@ class WorkspaceCliTests(unittest.TestCase):
                     "--project-name", f"artifact-race-{race_kind}"
                 )
                 self.run_state_command("start-day", root, "--day", "1")
-                source_dir = Path(
-                    self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-                )
-                artifact = source_dir / "产物" / "race.html"
+                overview = root / "Day01" / "当日总览产物"
+                artifact = overview / "race.html"
                 artifact.write_text("original artifact\n", encoding="utf-8")
-                moved_owner = source_dir.with_name(source_dir.name + "-moved")
+                moved_owner = overview.with_name(overview.name + "-moved")
                 external_owner = self.base / f"external-owner-{race_kind}"
                 external_owner.mkdir()
-                (external_owner / "源码导读.md").write_bytes(b"outside guide sentinel")
-                (external_owner / "产物").mkdir()
+                (external_owner / "当日统一总结.md").write_bytes(
+                    b"outside summary sentinel"
+                )
                 namespace = SimpleNamespace(
                     learning_root=str(root),
-                    owner_kind="source",
-                    owner_dir=str(source_dir),
+                    owner_kind="day-overview",
+                    owner_dir=str(overview),
                     artifact=str(artifact),
                 )
 
@@ -2612,22 +2165,27 @@ class WorkspaceCliTests(unittest.TestCase):
                         artifact.unlink()
                         artifact.write_text("replacement artifact\n", encoding="utf-8")
                     else:
-                        source_dir.rename(moved_owner)
-                        source_dir.symlink_to(external_owner, target_is_directory=True)
+                        overview.rename(moved_owner)
+                        overview.symlink_to(external_owner, target_is_directory=True)
 
-                with mock.patch.object(
-                    module,
-                    "artifact_pre_authority_seam",
-                    side_effect=swap_after_prepare,
-                ):
-                    with self.assertRaises(module.WorkspaceError):
-                        module.command_register_artifact(namespace)
+                try:
+                    with mock.patch.object(
+                        module,
+                        "artifact_pre_authority_seam",
+                        side_effect=swap_after_prepare,
+                    ):
+                        with self.assertRaises(module.WorkspaceError):
+                            module.command_register_artifact(namespace)
+                finally:
+                    if race_kind == "owner" and overview.is_symlink():
+                        overview.unlink()
+                        moved_owner.rename(overview)
 
                 raw_state = json.loads(self.state_path(root).read_text(encoding="utf-8"))
                 self.assertEqual(raw_state["artifacts"], [])
                 self.assertEqual(
-                    (external_owner / "源码导读.md").read_bytes(),
-                    b"outside guide sentinel",
+                    (external_owner / "当日统一总结.md").read_bytes(),
+                    b"outside summary sentinel",
                 )
                 if race_kind == "artifact":
                     self.assertEqual(
@@ -2656,10 +2214,8 @@ class WorkspaceCliTests(unittest.TestCase):
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "unsupported.html"
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "unsupported.html"
         artifact.write_text("unsupported\n", encoding="utf-8")
         before_json = self.state_path(root).read_bytes()
 
@@ -2668,8 +2224,8 @@ class WorkspaceCliTests(unittest.TestCase):
                 module.command_register_artifact(
                     SimpleNamespace(
                         learning_root=str(root),
-                        owner_kind="source",
-                        owner_dir=str(source_dir),
+                        owner_kind="day-overview",
+                        owner_dir=str(overview),
                         artifact=str(artifact),
                     )
                 )
@@ -2677,7 +2233,7 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
         self.assertNotIn(
             "unsupported.html",
-            (source_dir / "源码导读.md").read_text(encoding="utf-8"),
+            (overview / "当日统一总结.md").read_text(encoding="utf-8"),
         )
 
     def test_register_artifact_never_overwrites_concurrent_in_place_human_edits(self) -> None:
@@ -2688,23 +2244,21 @@ class WorkspaceCliTests(unittest.TestCase):
                     "--project-name", f"in-place-edit-{phase}"
                 )
                 self.run_state_command("start-day", root, "--day", "1")
-                source_dir = Path(
-                    self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-                )
-                artifact = source_dir / "产物" / "concurrent.html"
+                overview = root / "Day01" / "当日总览产物"
+                artifact = overview / "concurrent.html"
                 artifact.write_text("artifact\n", encoding="utf-8")
-                guide = source_dir / "源码导读.md"
+                summary = overview / "当日统一总结.md"
                 before_json = self.state_path(root).read_bytes()
                 human_append = f"\nHUMAN APPEND {phase}\n".encode("utf-8")
                 namespace = SimpleNamespace(
                     learning_root=str(root),
-                    owner_kind="source",
-                    owner_dir=str(source_dir),
+                    owner_kind="day-overview",
+                    owner_dir=str(overview),
                     artifact=str(artifact),
                 )
 
                 def append_in_place(*_args) -> None:
-                    with guide.open("ab") as handle:
+                    with summary.open("ab") as handle:
                         handle.write(human_append)
 
                 seam = (
@@ -2716,7 +2270,7 @@ class WorkspaceCliTests(unittest.TestCase):
                     with self.assertRaises(module.WorkspaceError):
                         module.command_register_artifact(namespace)
 
-                self.assertTrue(guide.read_bytes().endswith(human_append))
+                self.assertTrue(summary.read_bytes().endswith(human_append))
                 if phase == "pre-authority":
                     self.assertEqual(self.state_path(root).read_bytes(), before_json)
                     self.assertEqual(self.read_state(root)["artifacts"], [])
@@ -2724,7 +2278,7 @@ class WorkspaceCliTests(unittest.TestCase):
                     self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
 
                 module.command_register_artifact(namespace)
-                repaired = guide.read_bytes()
+                repaired = summary.read_bytes()
                 self.assertIn(human_append, repaired)
                 self.assertEqual(repaired.count(b"concurrent.html"), 1)
                 self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
@@ -2767,12 +2321,10 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_register_artifact_rejects_control_and_marker_injection_names(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        guide = source_dir / "源码导读.md"
+        overview = root / "Day01" / "当日总览产物"
+        summary = overview / "当日统一总结.md"
         before_json = self.state_path(root).read_bytes()
-        before_guide = guide.read_bytes()
+        before_summary = summary.read_bytes()
         bad_names = (
             "bad\nname.html",
             "bad<!-- learning-coach:artifacts:end -->.html",
@@ -2780,11 +2332,11 @@ class WorkspaceCliTests(unittest.TestCase):
         )
         for name in bad_names:
             with self.subTest(name=repr(name)):
-                artifact = source_dir / "产物" / name
+                artifact = overview / name
                 artifact.write_text("bad name\n", encoding="utf-8")
-                self.register_artifact(root, "source", source_dir, artifact, ok=False)
+                self.register_artifact(root, "day-overview", overview, artifact, ok=False)
                 self.assertEqual(self.state_path(root).read_bytes(), before_json)
-                self.assertEqual(guide.read_bytes(), before_guide)
+                self.assertEqual(summary.read_bytes(), before_summary)
 
     def test_projection_retry_is_allowed_after_owner_chain_becomes_sealed(self) -> None:
         module = load_cli_module()
@@ -2817,19 +2369,17 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_artifact_physical_identity_is_unique_and_replacement_is_rejected(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        day_dir = root / "Day01"
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        original = source_dir / "产物" / "CaseFlow.HTML"
-        alias = source_dir / "产物" / "caseflow.html"
+        self.begin_chain(root, 1, "主线")
+        overview = root / "Day01" / "当日总览产物"
+        original = overview / "CaseFlow.HTML"
+        alias = overview / "caseflow.html"
         original.write_text("same physical file\n", encoding="utf-8")
         if not alias.exists():
             os.link(original, alias)
         self.assertTrue(os.path.samefile(original, alias))
 
-        self.register_artifact(root, "source", source_dir, original)
-        self.register_artifact(root, "source", source_dir, alias)
+        self.register_artifact(root, "day-overview", overview, original)
+        self.register_artifact(root, "day-overview", overview, alias)
 
         state = self.read_state(root)
         self.assertEqual(len(state["artifacts"]), 1)
@@ -2837,11 +2387,11 @@ class WorkspaceCliTests(unittest.TestCase):
         metadata = original.stat()
         self.assertEqual(record["artifact_device"], metadata.st_dev)
         self.assertEqual(record["artifact_inode"], metadata.st_ino)
-        overview = day_dir / "当日总览产物"
-        second_owner_alias = overview / "same-physical.html"
+        chain_artifacts = root / "Day01" / "01-主线" / "产物"
+        second_owner_alias = chain_artifacts / "same-physical.html"
         os.link(original, second_owner_alias)
         self.register_artifact(
-            root, "day-overview", overview, second_owner_alias, ok=False
+            root, "chain", chain_artifacts, second_owner_alias, ok=False
         )
         self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
 
@@ -2854,9 +2404,9 @@ class WorkspaceCliTests(unittest.TestCase):
 
     def test_artifact_relative_path_must_be_exact_canonical_lexical_form(self) -> None:
         corruptions = (
-            "产物/./flow.html",
-            "产物//flow.html",
-            "产物\\flow.html",
+            "./flow.html",
+            "nested/../flow.html",
+            "flow\\name.html",
         )
         for index, corrupted in enumerate(corruptions, start=1):
             with self.subTest(corrupted=corrupted):
@@ -2864,12 +2414,10 @@ class WorkspaceCliTests(unittest.TestCase):
                     "--project-name", f"artifact-relative-{index}"
                 )
                 self.run_state_command("start-day", root, "--day", "1")
-                source_dir = Path(
-                    self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-                )
-                artifact = source_dir / "产物" / "flow.html"
+                overview = root / "Day01" / "当日总览产物"
+                artifact = overview / "flow.html"
                 artifact.write_text("flow\n", encoding="utf-8")
-                self.register_artifact(root, "source", source_dir, artifact)
+                self.register_artifact(root, "day-overview", overview, artifact)
                 state = self.read_state(root)
                 state["artifacts"][0]["relative_artifact_path"] = corrupted
                 self.state_path(root).write_text(
@@ -2886,22 +2434,20 @@ class WorkspaceCliTests(unittest.TestCase):
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "exchange-race.html"
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "exchange-race.html"
         artifact.write_text("artifact\n", encoding="utf-8")
-        guide = source_dir / "源码导读.md"
+        summary = overview / "当日统一总结.md"
         human_append = b"\nHUMAN EDIT AT EXCHANGE\n"
         namespace = SimpleNamespace(
             learning_root=str(root),
-            owner_kind="source",
-            owner_dir=str(source_dir),
+            owner_kind="day-overview",
+            owner_dir=str(overview),
             artifact=str(artifact),
         )
 
         def append_at_exchange(*_args) -> None:
-            with guide.open("ab") as handle:
+            with summary.open("ab") as handle:
                 handle.write(human_append)
 
         with mock.patch.object(
@@ -2913,13 +2459,13 @@ class WorkspaceCliTests(unittest.TestCase):
                 module.command_register_artifact(namespace)
 
         self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
-        failed_projection = guide.read_bytes()
+        failed_projection = summary.read_bytes()
         self.assertTrue(failed_projection.endswith(human_append))
         self.assertNotIn(b"exchange-race.html", failed_projection)
 
         module.command_register_artifact(namespace)
 
-        repaired = guide.read_bytes()
+        repaired = summary.read_bytes()
         self.assertIn(human_append, repaired)
         self.assertEqual(repaired.count(b"exchange-race.html"), 1)
         self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
@@ -2928,19 +2474,17 @@ class WorkspaceCliTests(unittest.TestCase):
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "safe-candidate.html"
+        overview = root / "Day01" / "当日总览产物"
+        artifact = overview / "safe-candidate.html"
         artifact.write_text("artifact\n", encoding="utf-8")
-        guide = source_dir / "源码导读.md"
-        original_guide = guide.read_bytes()
+        summary = overview / "当日统一总结.md"
+        original_summary = summary.read_bytes()
         attacker_bytes = b"ATTACKER TEMP CONTENT\n"
         observed_temp_names: list[str] = []
         namespace = SimpleNamespace(
             learning_root=str(root),
-            owner_kind="source",
-            owner_dir=str(source_dir),
+            owner_kind="day-overview",
+            owner_dir=str(overview),
             artifact=str(artifact),
         )
 
@@ -2974,16 +2518,16 @@ class WorkspaceCliTests(unittest.TestCase):
                 module.command_register_artifact(namespace)
 
         self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
-        self.assertEqual(guide.read_bytes(), original_guide)
-        self.assertNotIn(attacker_bytes, guide.read_bytes())
+        self.assertEqual(summary.read_bytes(), original_summary)
+        self.assertNotIn(attacker_bytes, summary.read_bytes())
         self.assertEqual(len(observed_temp_names), 1)
-        foreign_temp = source_dir / observed_temp_names[0]
+        foreign_temp = overview / observed_temp_names[0]
         self.assertEqual(foreign_temp.read_bytes(), attacker_bytes)
 
         module.command_register_artifact(namespace)
 
         self.assertEqual(
-            (source_dir / "源码导读.md").read_bytes().count(b"safe-candidate.html"),
+            (overview / "当日统一总结.md").read_bytes().count(b"safe-candidate.html"),
             1,
         )
         self.assertEqual(foreign_temp.read_bytes(), attacker_bytes)
@@ -2992,6 +2536,7 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("register-artifact", "--help").returncode, 0)
         root_help = self.run_cli("--help")
         self.assertIn("register-artifact", root_help.stdout)
+        self.assertNotIn("add-source", root_help.stdout)
         for command in (
             "init",
             "start-day",
@@ -2999,7 +2544,6 @@ class WorkspaceCliTests(unittest.TestCase):
             "complete-checkpoint",
             "reopen-checkpoint",
             "set-resume",
-            "add-source",
             "register-artifact",
             "complete-day",
             "sync-state",
