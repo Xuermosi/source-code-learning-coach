@@ -57,32 +57,32 @@ def tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
-def active_stage_count(root: Path) -> int:
+def active_chain_count(root: Path) -> int:
     state = json.loads((root / "学习状态.json").read_text(encoding="utf-8"))
-    return sum(stage["status"] == "active" for stage in state["stages"])
+    return sum(chain["status"] == "active" for chain in state["chains"])
 
 
-def stage_marker(state: dict, day: int, bounds: list[int], revision: int) -> dict:
+def chain_marker(state: dict, day: int, order: int, name: str) -> dict:
     return {
-        "kind": "source-code-learning-stage",
+        "kind": "source-code-learning-chain",
         "marker_version": 1,
-        "schema_version": 1,
+        "schema_version": 2,
         "learning_root_id": state["learning_root_id"],
         "day": day,
-        "range": bounds,
-        "revision": revision,
+        "order": order,
+        "name": name,
     }
 
 
 def source_marker(
-    state: dict, stage: Path, root: Path, source: Path, target: Path, order: int, label: str
+    state: dict, day_dir: Path, root: Path, source: Path, target: Path, order: int, label: str
 ) -> dict:
     return {
         "kind": "source-code-learning-source",
         "marker_version": 1,
-        "schema_version": 1,
+        "schema_version": 2,
         "learning_root_id": state["learning_root_id"],
-        "stage_id": stage.relative_to(root).as_posix(),
+        "stage_id": day_dir.relative_to(root).as_posix(),
         "canonical_source_path": str(source.resolve()),
         "relative_learning_dir": target.relative_to(root).as_posix(),
         "order": order,
@@ -93,7 +93,6 @@ def source_marker(
 def roadmap() -> dict:
     return {
         "title": "Demo 学习路线",
-        "stage_ranges": [[0, 30], [31, 60], [61, 100]],
         "days": [
             {
                 "day": 1,
@@ -190,17 +189,27 @@ class WorkspaceCliTests(unittest.TestCase):
     def run_state_command(self, command: str, root: Path, *args: str, ok: bool = True):
         return self.run_cli(command, "--learning-root", str(root), *args, ok=ok)
 
+    def day_dir(self, root: Path) -> Path:
+        state = self.read_state(root)
+        current_day = state["current"]["day"]
+        self.assertIsNotNone(current_day, "no active Day")
+        return root / state["days"][current_day - 1]["path"] if "path" in state["days"][current_day - 1] else root / f"Day{current_day:0{max(2, len(str(state['route_days'])))}d}"
+
+    def begin_chain(self, root: Path, day: int, name: str, ok: bool = True):
+        return self.run_state_command(
+            "begin-chain", root, "--day", str(day), "--name", name, ok=ok
+        )
+
     def add_source(
-        self, root: Path, source: Path, *extra_args: str, stage: Path | None = None,
+        self, root: Path, source: Path, *extra_args: str, day_dir: Path | None = None,
         ok: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        if stage is None:
-            state = self.read_state(root)
-            stage = root / state["current"]["stage"]["path"]
+        if day_dir is None:
+            day_dir = self.day_dir(root)
         return self.run_cli(
             "add-source",
-            "--stage",
-            str(stage),
+            "--day-dir",
+            str(day_dir),
             "--source",
             str(source),
             *extra_args,
@@ -269,21 +278,21 @@ class WorkspaceCliTests(unittest.TestCase):
         )
 
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py", stage=stage).stdout.strip()
+            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
         )
 
         self.assertIn(
             "真实源码路径", (source_dir / "源码导读.md").read_text(encoding="utf-8")
         )
         self.assertIn(
-            "用户问题", (stage / "问题与解答.md").read_text(encoding="utf-8")
+            "用户问题", (day_dir / "问题与解答.md").read_text(encoding="utf-8")
         )
         self.assertIn(
-            "已闭环流程", (stage / "当日总结.md").read_text(encoding="utf-8")
+            "已闭环流程", (day_dir / "当日总结.md").read_text(encoding="utf-8")
         )
-        overview = stage / "当日总览产物" / "当日统一总结.md"
+        overview = day_dir / "当日总览产物" / "当日统一总结.md"
         self.assertIn("整体框架联系", overview.read_text(encoding="utf-8"))
 
         for text in (
@@ -415,12 +424,11 @@ class WorkspaceCliTests(unittest.TestCase):
             "--day",
             "1",
         )
-        stage = root / "Day01" / "进度条0-30%"
         source_result = self.run_cli_from(
             unrelated,
             "add-source",
-            "--stage",
-            str(stage),
+            "--day-dir",
+            str(root / "Day01"),
             "--source",
             str(self.repo / "src" / "main.py"),
         )
@@ -450,18 +458,18 @@ class WorkspaceCliTests(unittest.TestCase):
 
         root = self.init_workspace("--project-name", "missing-source-template")
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         before_json = self.state_path(root).read_bytes()
         with mock.patch.object(module, "TEMPLATE_ROOT", missing_templates):
             with self.assertRaisesRegex(module.WorkspaceError, "template"):
                 module.command_add_source(
                     SimpleNamespace(
-                        stage=str(stage),
+                        day_dir=str(day_dir),
                         source=str(self.repo / "src" / "main.py"),
                         label=None,
                     )
                 )
-        self.assertFalse((stage / "01-main.py").exists())
+        self.assertFalse((day_dir / "01-main.py").exists())
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
 
     def test_unknown_tokens_leave_no_half_workspace_or_source(self) -> None:
@@ -487,7 +495,7 @@ class WorkspaceCliTests(unittest.TestCase):
 
         root = self.init_workspace("--project-name", "unknown-source-token")
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         source_template = poisoned / "source-guide.md"
         source_template.write_text(
             (real_templates / "source-guide.md").read_text(encoding="utf-8")
@@ -499,12 +507,12 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.assertRaisesRegex(module.WorkspaceError, "UNKNOWN"):
                 module.command_add_source(
                     SimpleNamespace(
-                        stage=str(stage),
+                        day_dir=str(day_dir),
                         source=str(self.repo / "src" / "main.py"),
                         label=None,
                     )
                 )
-        self.assertFalse((stage / "01-main.py").exists())
+        self.assertFalse((day_dir / "01-main.py").exists())
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
 
     def test_init_rejects_invalid_roadmaps_without_partial_root(self) -> None:
@@ -541,21 +549,6 @@ class WorkspaceCliTests(unittest.TestCase):
             "empty checkpoint id": lambda data: data["days"][0]["checkpoints"][0].__setitem__(
                 "id", ""
             ),
-            "gapped ranges": lambda data: data.__setitem__(
-                "stage_ranges", [[0, 30], [32, 100]]
-            ),
-            "overlapping ranges": lambda data: data.__setitem__(
-                "stage_ranges", [[0, 30], [30, 100]]
-            ),
-            "unordered ranges": lambda data: data.__setitem__(
-                "stage_ranges", [[31, 100], [0, 30]]
-            ),
-            "noninteger ranges": lambda data: data.__setitem__(
-                "stage_ranges", [[0, 30.5], [31, 100]]
-            ),
-            "wrong range endpoints": lambda data: data.__setitem__(
-                "stage_ranges", [[1, 30], [31, 99]]
-            ),
             "unordered days": lambda data: data["days"].reverse(),
             "missing day number": lambda data: data["days"][1].__setitem__("day", 3),
         }
@@ -576,14 +569,18 @@ class WorkspaceCliTests(unittest.TestCase):
                 self.assertFalse(final_root.exists())
                 self.assert_no_temp_workspace(final_root)
 
-    def test_init_materializes_default_stage_ranges(self) -> None:
+    def test_init_ignores_legacy_stage_ranges_key(self) -> None:
         data = roadmap()
-        del data["stage_ranges"]
+        data["stage_ranges"] = [[0, 30], [31, 60], [61, 100]]
         self.write_roadmap(data)
 
         root = self.init_workspace()
+
         state = json.loads((root / "学习状态.json").read_text(encoding="utf-8"))
-        self.assertEqual(state["stage_ranges"], [[0, 30], [31, 60], [61, 100]])
+        self.assertNotIn("stage_ranges", state)
+        self.assertNotIn("stages", state)
+        self.assertEqual(state["chains"], [])
+        self.assertEqual(state["schema_version"], 2)
 
     def test_init_does_not_modify_existing_target(self) -> None:
         root = self.base / "demo-project-2天学习路线"
@@ -820,20 +817,19 @@ class WorkspaceCliTests(unittest.TestCase):
             (learning_root / ".learning-root.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["schema_version"], 2)
         self.assertEqual(str(uuid.UUID(state["learning_root_id"])), state["learning_root_id"])
         self.assertEqual(marker["learning_root_id"], state["learning_root_id"])
         self.assertEqual(Path(state["learning_root"]), learning_root.resolve())
         self.assertEqual(Path(state["repository"]), self.repo.resolve())
         self.assertEqual(state["route_title"], "Demo 学习路线")
         self.assertEqual(state["route_days"], 2)
-        self.assertEqual(state["stage_ranges"], [[0, 30], [31, 60], [61, 100]])
         self.assertIsNone(state["current"]["day"])
-        self.assertIsNone(state["current"]["stage"])
+        self.assertIsNone(state["current"]["chain"])
         self.assertIsNone(state["current"]["last_source"])
         self.assertEqual(state["current"]["resume_marker"], "")
         self.assertEqual(state["current"]["closed_flows"], [])
-        self.assertEqual(state["stages"], [])
+        self.assertEqual(state["chains"], [])
         self.assertEqual(state["sources"], [])
         self.assertEqual(state["artifacts"], [])
         self.assertEqual(state["history"], [])
@@ -874,37 +870,105 @@ class WorkspaceCliTests(unittest.TestCase):
                 self.assertEqual(tree_hash(self.repo), self.repo_hash)
                 self.assertEqual(self.roadmap.read_bytes(), self.roadmap_bytes)
 
-    def test_stage_range_for_maps_default_and_custom_boundaries(self) -> None:
-        module = load_cli_module()
-        defaults = [[0, 30], [31, 60], [61, 100]]
-        self.assertEqual(module.stage_range_for(0, defaults), [0, 30])
-        self.assertEqual(module.stage_range_for(30, defaults), [0, 30])
-        self.assertEqual(module.stage_range_for(31, defaults), [31, 60])
-        self.assertEqual(module.stage_range_for(60, defaults), [31, 60])
-        self.assertEqual(module.stage_range_for(61, defaults), [61, 100])
-        self.assertEqual(module.stage_range_for(100, defaults), [61, 100])
-
-        custom = [[0, 10], [11, 99], [100, 100]]
-        self.assertEqual(module.stage_range_for(10, custom), [0, 10])
-        self.assertEqual(module.stage_range_for(11, custom), [11, 99])
-        self.assertEqual(module.stage_range_for(99, custom), [11, 99])
-        self.assertEqual(module.stage_range_for(100, custom), [100, 100])
-
-    def test_progress_crosses_directly_from_20_to_70(self) -> None:
+    def test_begin_chain_creates_chain_dir_with_marker_brief_and_artifacts(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
+
+        result = self.begin_chain(root, 1, "入口分析")
+        created = Path(result.stdout.strip())
+
+        self.assertEqual(created, root / "Day01" / "01-入口分析")
+        self.assertTrue(created.is_dir())
+        self.assertTrue((created / "链说明.md").is_file())
+        self.assertTrue((created / "产物").is_dir())
+        marker = json.loads((created / ".learning-chain.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            marker,
+            {
+                "kind": "source-code-learning-chain",
+                "marker_version": 1,
+                "schema_version": 2,
+                "learning_root_id": self.read_state(root)["learning_root_id"],
+                "day": 1,
+                "order": 1,
+                "name": "入口分析",
+            },
+        )
+        state = self.read_state(root)
+        self.assertEqual(len(state["chains"]), 1)
+        self.assertEqual(state["chains"][0]["status"], "active")
+        self.assertEqual(state["chains"][0]["path"], "Day01/01-入口分析")
+        self.assertEqual(state["current"]["chain"]["path"], "Day01/01-入口分析")
+        self.assertEqual(active_chain_count(root), 1)
+
+    def test_second_begin_chain_seals_first_and_advances_order(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        first_dir = Path(self.begin_chain(root, 1, "入口").stdout.strip())
+        first_hash = tree_hash(first_dir)
+
+        second_dir = Path(self.begin_chain(root, 1, "依赖").stdout.strip())
+
+        self.assertEqual(first_dir, root / "Day01" / "01-入口")
+        self.assertEqual(second_dir, root / "Day01" / "02-依赖")
+        state = self.read_state(root)
+        self.assertEqual(len(state["chains"]), 2)
+        self.assertEqual(state["chains"][0]["status"], "sealed")
+        self.assertEqual(state["chains"][0]["path"], "Day01/01-入口")
+        self.assertIn("sealed_at", state["chains"][0])
+        self.assertEqual(state["chains"][1]["status"], "active")
+        self.assertEqual(state["chains"][1]["path"], "Day01/02-依赖")
+        self.assertEqual(state["current"]["chain"]["path"], "Day01/02-依赖")
+        self.assertEqual(tree_hash(first_dir), first_hash)
+        self.assertEqual(active_chain_count(root), 1)
+
+    def test_begin_chain_rejects_when_no_active_day_or_wrong_day(self) -> None:
+        root = self.init_workspace()
+        before = self.state_path(root).read_bytes()
+
+        self.begin_chain(root, 1, "无活跃Day", ok=False)
+        self.assertEqual(self.state_path(root).read_bytes(), before)
+
+        self.run_state_command("start-day", root, "--day", "1")
+        before = self.state_path(root).read_bytes()
+        self.begin_chain(root, 2, "错误Day", ok=False)
+        self.assertEqual(self.state_path(root).read_bytes(), before)
+        self.assertFalse((root / "Day02" / "01-错误Day").exists())
+
+    def test_begin_chain_rejects_unsafe_name_without_writes(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        day_dir = root / "Day01"
+        cases = ("../escape", ".", "..", "bad/name", "bad\nname", "")
+        for name in cases:
+            with self.subTest(name=repr(name)):
+                before = self.state_path(root).read_bytes()
+                before_day = tree_hash(day_dir)
+                self.begin_chain(root, 1, name, ok=False)
+                self.assertEqual(self.state_path(root).read_bytes(), before)
+                self.assertEqual(tree_hash(day_dir), before_day)
+                self.assertEqual(active_chain_count(root), 0)
+
+    def test_complete_checkpoint_updates_progress_without_touching_chains(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "主线")
+        chain_before = self.read_state(root)["chains"]
+        chain_dir = root / "Day01" / "01-主线"
+        chain_dir_hash = tree_hash(chain_dir)
+
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
 
         state = self.read_state(root)
         self.assertEqual(state["current"]["progress"], 70)
-        self.assertEqual(state["current"]["stage"]["range"], [61, 100])
-        self.assertFalse((root / "Day01" / "进度条31-60%").exists())
-        self.assertEqual(state["stages"][0]["status"], "sealed")
-        self.assertEqual(state["stages"][-1]["status"], "active")
-        self.assertEqual(active_stage_count(root), 1)
+        self.assertEqual(state["chains"], chain_before)
+        self.assertEqual(state["current"]["chain"]["path"], "Day01/01-主线")
+        self.assertEqual(tree_hash(chain_dir), chain_dir_hash)
+        self.assertFalse((root / "Day01" / "02-").exists())
+        self.assertEqual(active_chain_count(root), 1)
 
-    def test_reopen_checkpoint_creates_revision_stage_and_records_reason(self) -> None:
+    def test_reopen_checkpoint_records_reason_and_restores_progress(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
@@ -918,79 +982,66 @@ class WorkspaceCliTests(unittest.TestCase):
             "需要重新理解调用链",
         )
 
-        self.assertTrue((root / "Day01" / "进度条0-30%-修订01").is_dir())
         state = self.read_state(root)
         self.assertEqual(state["current"]["progress"], 20)
-        self.assertEqual(state["current"]["stage"]["range"], [0, 30])
         self.assertEqual(state["history"][-1]["reason"], "需要重新理解调用链")
-        self.assertEqual(active_stage_count(root), 1)
+        self.assertEqual(state["days"][0]["checkpoints"][1]["status"], "pending")
 
-    def test_second_reopen_uses_revision_02_without_touching_old_stage_trees(self) -> None:
+    def test_reopen_then_recomplete_is_idempotent_on_chains(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "基线链")
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("reopen-checkpoint", root, "--checkpoint", "d1-entry", "--reason", "one")
-        original = root / "Day01" / "进度条0-30%"
-        revision_01 = root / "Day01" / "进度条0-30%-修订01"
-        old_hashes = (tree_hash(original), tree_hash(revision_01))
-
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("reopen-checkpoint", root, "--checkpoint", "d1-entry", "--reason", "two")
-
-        self.assertTrue((root / "Day01" / "进度条0-30%-修订02").is_dir())
-        self.assertEqual((tree_hash(original), tree_hash(revision_01)), old_hashes)
-        self.assertEqual(active_stage_count(root), 1)
-
-    def test_recompleted_checkpoint_uses_revision_when_target_base_is_registered(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
-        base_high = root / "Day01" / "进度条61-100%"
-        base_low = root / "Day01" / "进度条0-30%"
-        old_hashes = (tree_hash(base_low), tree_hash(base_high))
         self.run_state_command(
-            "reopen-checkpoint",
-            root,
-            "--checkpoint",
-            "d1-flow",
-            "--reason",
-            "retrace",
+            "reopen-checkpoint", root, "--checkpoint", "d1-entry", "--reason", "one"
         )
-        low_revision = root / "Day01" / "进度条0-30%-修订01"
-        old_low_revision_hash = tree_hash(low_revision)
+        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
+        self.run_state_command(
+            "reopen-checkpoint", root, "--checkpoint", "d1-entry", "--reason", "two"
+        )
+        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
 
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
-
-        high_revision = root / "Day01" / "进度条61-100%-修订01"
         state = self.read_state(root)
-        self.assertTrue(high_revision.is_dir())
-        self.assertEqual(state["current"]["progress"], 70)
-        self.assertEqual(state["current"]["stage"]["range"], [61, 100])
-        self.assertEqual(state["current"]["stage"]["revision"], 1)
-        self.assertEqual((tree_hash(base_low), tree_hash(base_high)), old_hashes)
-        self.assertEqual(tree_hash(low_revision), old_low_revision_hash)
+        self.assertEqual(len(state["chains"]), 1)
+        self.assertEqual(state["chains"][0]["status"], "active")
+        self.assertEqual(active_chain_count(root), 1)
 
-    def test_complete_day_clears_current_then_allows_next_day(self) -> None:
+    def test_complete_day_seals_active_chain_then_allows_next_day(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "主线")
         for checkpoint in ("d1-entry", "d1-flow", "d1-summary"):
             self.run_state_command("complete-checkpoint", root, "--checkpoint", checkpoint)
         self.run_state_command("complete-day", root, "--day", "1")
 
         between = self.read_state(root)
         self.assertEqual(between["days"][0]["status"], "completed")
-        self.assertEqual(between["stages"][-1]["status"], "sealed")
+        self.assertEqual(between["chains"][0]["status"], "sealed")
         self.assertIsNone(between["current"]["day"])
-        self.assertIsNone(between["current"]["stage"])
-        self.assertEqual(active_stage_count(root), 0)
+        self.assertIsNone(between["current"]["chain"])
+        self.assertEqual(active_chain_count(root), 0)
 
         self.run_state_command("start-day", root, "--day", "2")
         state = self.read_state(root)
         self.assertEqual(state["current"]["day"], 2)
         self.assertEqual(state["days"][0]["status"], "completed")
         self.assertEqual(state["days"][1]["status"], "active")
-        self.assertEqual(active_stage_count(root), 1)
+        self.assertEqual(active_chain_count(root), 0)
+        self.assertIsNone(state["current"]["chain"])
+
+    def test_complete_day_succeeds_with_zero_chains(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        for checkpoint in ("d1-entry", "d1-flow", "d1-summary"):
+            self.run_state_command("complete-checkpoint", root, "--checkpoint", checkpoint)
+        before = self.state_path(root).read_bytes()
+
+        self.run_state_command("complete-day", root, "--day", "1")
+
+        state = self.read_state(root)
+        self.assertEqual(state["days"][0]["status"], "completed")
+        self.assertEqual(state["chains"], [])
+        self.assertNotEqual(self.state_path(root).read_bytes(), before)
 
     def test_invalid_state_transitions_leave_authority_unchanged(self) -> None:
         root = self.init_workspace()
@@ -1021,6 +1072,11 @@ class WorkspaceCliTests(unittest.TestCase):
                 "reopen-checkpoint",
                 ("--checkpoint", "d1-flow", "--reason", "not completed"),
             ),
+            (
+                "begin-chain on wrong day",
+                "begin-chain",
+                ("--day", "2", "--name", "wrong"),
+            ),
         ]
         for label, command, arguments in invalid_active_cases:
             with self.subTest(label=label):
@@ -1028,13 +1084,16 @@ class WorkspaceCliTests(unittest.TestCase):
                 self.run_state_command(command, root, *arguments, ok=False)
                 self.assertEqual(self.state_path(root).read_bytes(), before)
 
-    def test_two_active_stages_are_rejected_without_mutation(self) -> None:
+    def test_two_active_chains_are_rejected_without_mutation(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "基线")
         state = self.read_state(root)
-        duplicate = copy.deepcopy(state["stages"][0])
-        duplicate["path"] = "Day01/foreign-active"
-        state["stages"].append(duplicate)
+        duplicate = copy.deepcopy(state["chains"][0])
+        duplicate["path"] = "Day01/02-foreign"
+        duplicate["order"] = 2
+        duplicate["name"] = "foreign"
+        state["chains"].append(duplicate)
         self.state_path(root).write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         before = self.state_path(root).read_bytes()
 
@@ -1189,7 +1248,7 @@ class WorkspaceCliTests(unittest.TestCase):
 
         self.assertEqual(self.state_path(root).read_bytes(), before)
 
-    def test_precommit_failures_remove_new_stage_and_preserve_authority(self) -> None:
+    def test_precommit_failures_preserve_authority_and_no_new_chain(self) -> None:
         module = load_cli_module()
 
         root = self.init_workspace()
@@ -1197,9 +1256,14 @@ class WorkspaceCliTests(unittest.TestCase):
         with mock.patch.object(module, "replace_authority_json", side_effect=OSError("authority fail")):
             with self.assertRaises(OSError):
                 module.command_start_day(SimpleNamespace(learning_root=str(root), day=1))
+        # Authority JSON is unchanged; the day-level files are legitimate start-day
+        # output written before the authority commit, so they may remain on disk.
         self.assertEqual(self.state_path(root).read_bytes(), before)
-        self.assertEqual(active_stage_count(root), 0)
-        self.assertFalse((root / "Day01" / "进度条0-30%").exists())
+        self.assertEqual(active_chain_count(root), 0)
+        state = self.read_state(root)
+        self.assertIsNone(state["current"]["day"])
+        self.assertIsNone(state["current"]["chain"])
+        self.assertEqual(state["days"][0]["status"], "pending")
 
         self.run_state_command("start-day", root, "--day", "1")
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
@@ -1210,46 +1274,47 @@ class WorkspaceCliTests(unittest.TestCase):
                     SimpleNamespace(learning_root=str(root), checkpoint="d1-flow")
                 )
         self.assertEqual(self.state_path(root).read_bytes(), before)
-        self.assertEqual(active_stage_count(root), 1)
-        self.assertFalse((root / "Day01" / "进度条61-100%").exists())
+        self.assertEqual(active_chain_count(root), 0)
 
         before = self.state_path(root).read_bytes()
         with mock.patch.object(module, "replace_authority_json", side_effect=OSError("authority fail")):
             with self.assertRaises(OSError):
-                module.command_reopen_checkpoint(
+                module.command_begin_chain(
                     SimpleNamespace(
-                        learning_root=str(root), checkpoint="d1-entry", reason="retry"
+                        learning_root=str(root), day=1, name="预提交失败"
                     )
                 )
         self.assertEqual(self.state_path(root).read_bytes(), before)
-        self.assertEqual(active_stage_count(root), 1)
-        self.assertFalse((root / "Day01" / "进度条0-30%-修订01").exists())
+        self.assertEqual(active_chain_count(root), 0)
+        self.assertFalse((root / "Day01" / "01-预提交失败").exists())
 
-    def test_retry_cleans_only_owned_unregistered_stage_residue(self) -> None:
+    def test_retry_cleans_only_owned_unregistered_chain_residue(self) -> None:
         root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
         state = self.read_state(root)
-        target = root / "Day01" / "进度条0-30%"
+        target = root / "Day01" / "01-主线"
         target.mkdir()
-        (target / ".learning-stage.json").write_text(
-            json.dumps(stage_marker(state, 1, [0, 30], 0)), encoding="utf-8"
+        (target / ".learning-chain.json").write_text(
+            json.dumps(chain_marker(state, 1, 1, "主线")), encoding="utf-8"
         )
         (target / "stale.txt").write_text("stale", encoding="utf-8")
 
-        self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "主线")
 
         self.assertTrue(target.is_dir())
         self.assertFalse((target / "stale.txt").exists())
-        self.assertEqual(active_stage_count(root), 1)
+        self.assertEqual(active_chain_count(root), 1)
 
-    def test_retry_rejects_and_preserves_foreign_stage_directory(self) -> None:
+    def test_retry_rejects_and_preserves_foreign_chain_directory(self) -> None:
         root = self.init_workspace()
-        target = root / "Day01" / "进度条0-30%"
+        self.run_state_command("start-day", root, "--day", "1")
+        target = root / "Day01" / "01-主线"
         target.mkdir()
         sentinel = target / "sentinel.bin"
         sentinel.write_bytes(b"foreign")
         before = self.state_path(root).read_bytes()
 
-        self.run_state_command("start-day", root, "--day", "1", ok=False)
+        self.begin_chain(root, 1, "主线", ok=False)
 
         self.assertEqual(self.state_path(root).read_bytes(), before)
         self.assertEqual(sentinel.read_bytes(), b"foreign")
@@ -1261,18 +1326,19 @@ class WorkspaceCliTests(unittest.TestCase):
             "schema_version": 999,
             "learning_root_id": str(uuid.uuid4()),
             "day": 2,
-            "range": [31, 60],
-            "revision": 1,
+            "order": 5,
+            "name": "different",
         }
         for index, (field, wrong_value) in enumerate(wrong_fields.items(), start=1):
             with self.subTest(field=field):
                 root = self.init_workspace("--project-name", f"forged-marker-{index}")
+                self.run_state_command("start-day", root, "--day", "1")
                 state = self.read_state(root)
-                target = root / "Day01" / "进度条0-30%"
+                target = root / "Day01" / "01-主线"
                 target.mkdir()
-                marker = stage_marker(state, 1, [0, 30], 0)
+                marker = chain_marker(state, 1, 1, "主线")
                 marker[field] = wrong_value
-                (target / ".learning-stage.json").write_text(
+                (target / ".learning-chain.json").write_text(
                     json.dumps(marker), encoding="utf-8"
                 )
                 sentinel = target / "user-data.bin"
@@ -1280,120 +1346,20 @@ class WorkspaceCliTests(unittest.TestCase):
                 before_json = self.state_path(root).read_bytes()
                 before_target = tree_hash(target)
 
-                self.run_state_command("start-day", root, "--day", "1", ok=False)
+                self.begin_chain(root, 1, "主线", ok=False)
 
                 self.assertEqual(self.state_path(root).read_bytes(), before_json)
                 self.assertEqual(tree_hash(target), before_target)
                 self.assertEqual(sentinel.read_bytes(), b"must-survive")
 
-    def test_checkpoint_transition_retry_cleans_owned_residue_and_rejects_foreign(self) -> None:
-        owned_root = self.init_workspace("--project-name", "checkpoint-owned")
-        self.run_state_command("start-day", owned_root, "--day", "1")
-        self.run_state_command(
-            "complete-checkpoint", owned_root, "--checkpoint", "d1-entry"
-        )
-        owned_state = self.read_state(owned_root)
-        owned_target = owned_root / "Day01" / "进度条61-100%"
-        owned_target.mkdir()
-        (owned_target / ".learning-stage.json").write_text(
-            json.dumps(stage_marker(owned_state, 1, [61, 100], 0)),
-            encoding="utf-8",
-        )
-        (owned_target / "stale.txt").write_text("stale", encoding="utf-8")
-
-        self.run_state_command(
-            "complete-checkpoint", owned_root, "--checkpoint", "d1-flow"
-        )
-
-        self.assertFalse((owned_target / "stale.txt").exists())
-        self.assertEqual(self.read_state(owned_root)["current"]["stage"]["range"], [61, 100])
-        self.assertEqual(active_stage_count(owned_root), 1)
-
-        foreign_root = self.init_workspace("--project-name", "checkpoint-foreign")
-        self.run_state_command("start-day", foreign_root, "--day", "1")
-        self.run_state_command(
-            "complete-checkpoint", foreign_root, "--checkpoint", "d1-entry"
-        )
-        foreign_target = foreign_root / "Day01" / "进度条61-100%"
-        foreign_target.mkdir()
-        sentinel = foreign_target / "sentinel.bin"
-        sentinel.write_bytes(b"foreign-checkpoint")
-        before = self.state_path(foreign_root).read_bytes()
-
-        self.run_state_command(
-            "complete-checkpoint",
-            foreign_root,
-            "--checkpoint",
-            "d1-flow",
-            ok=False,
-        )
-
-        self.assertEqual(self.state_path(foreign_root).read_bytes(), before)
-        self.assertEqual(sentinel.read_bytes(), b"foreign-checkpoint")
-        self.assertEqual(active_stage_count(foreign_root), 1)
-
-    def test_reopen_retry_cleans_owned_residue_and_rejects_foreign(self) -> None:
-        owned_root = self.init_workspace("--project-name", "reopen-owned")
-        self.run_state_command("start-day", owned_root, "--day", "1")
-        self.run_state_command(
-            "complete-checkpoint", owned_root, "--checkpoint", "d1-entry"
-        )
-        owned_state = self.read_state(owned_root)
-        owned_target = owned_root / "Day01" / "进度条0-30%-修订01"
-        owned_target.mkdir()
-        (owned_target / ".learning-stage.json").write_text(
-            json.dumps(stage_marker(owned_state, 1, [0, 30], 1)),
-            encoding="utf-8",
-        )
-        (owned_target / "stale.txt").write_text("stale", encoding="utf-8")
-
-        self.run_state_command(
-            "reopen-checkpoint",
-            owned_root,
-            "--checkpoint",
-            "d1-entry",
-            "--reason",
-            "review again",
-        )
-
-        self.assertFalse((owned_target / "stale.txt").exists())
-        self.assertEqual(self.read_state(owned_root)["current"]["stage"]["revision"], 1)
-        self.assertEqual(active_stage_count(owned_root), 1)
-
-        foreign_root = self.init_workspace("--project-name", "reopen-foreign")
-        self.run_state_command("start-day", foreign_root, "--day", "1")
-        self.run_state_command(
-            "complete-checkpoint", foreign_root, "--checkpoint", "d1-entry"
-        )
-        foreign_target = foreign_root / "Day01" / "进度条0-30%-修订01"
-        foreign_target.mkdir()
-        sentinel = foreign_target / "sentinel.bin"
-        sentinel.write_bytes(b"foreign-reopen")
-        before = self.state_path(foreign_root).read_bytes()
-
-        self.run_state_command(
-            "reopen-checkpoint",
-            foreign_root,
-            "--checkpoint",
-            "d1-entry",
-            "--reason",
-            "must not clobber",
-            ok=False,
-        )
-
-        self.assertEqual(self.state_path(foreign_root).read_bytes(), before)
-        self.assertEqual(sentinel.read_bytes(), b"foreign-reopen")
-        self.assertEqual(active_stage_count(foreign_root), 1)
-
-    def test_active_stage_day_corruption_is_rejected_by_every_state_command(self) -> None:
+    def test_active_chain_marker_mismatch_is_rejected_by_every_state_command(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        state = self.read_state(root)
-        state["stages"][0]["day"] = 2
-        state["current"]["stage"]["day"] = 2
-        self.state_path(root).write_text(
-            json.dumps(state, ensure_ascii=False), encoding="utf-8"
-        )
+        self.begin_chain(root, 1, "主线")
+        marker_path = root / "Day01" / "01-主线" / ".learning-chain.json"
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["learning_root_id"] = str(uuid.uuid4())
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
         source = self.repo / "src" / "main.py"
         commands = (
             ("start-day", ("--day", "1")),
@@ -1410,66 +1376,52 @@ class WorkspaceCliTests(unittest.TestCase):
         for command, arguments in commands:
             with self.subTest(command=command):
                 result = self.run_state_command(command, root, *arguments, ok=False)
-                self.assertIn("active stage Day", result.stderr)
+                self.assertIn("chain", result.stderr.lower())
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(tree_hash(root), before_tree)
 
-    def test_active_stage_range_must_contain_recomputed_progress(self) -> None:
-        root = self.init_workspace()
-        self.run_state_command("start-day", root, "--day", "1")
-        state = self.read_state(root)
-        state["stages"][0]["range"] = [31, 60]
-        state["current"]["stage"]["range"] = [31, 60]
-        self.state_path(root).write_text(
-            json.dumps(state, ensure_ascii=False), encoding="utf-8"
-        )
-        before_tree = tree_hash(root)
-
-        result = self.run_state_command("sync-state", root, ok=False)
-
-        self.assertIn("active stage range", result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual(tree_hash(root), before_tree)
-
-    def test_active_stage_directory_and_marker_are_validated(self) -> None:
-        missing_root = self.init_workspace("--project-name", "missing-stage")
+    def test_active_chain_directory_and_marker_are_validated(self) -> None:
+        missing_root = self.init_workspace("--project-name", "missing-chain")
         self.run_state_command("start-day", missing_root, "--day", "1")
+        self.begin_chain(missing_root, 1, "主线")
         missing_state = self.read_state(missing_root)
-        missing_path = missing_root / missing_state["current"]["stage"]["path"]
+        missing_path = missing_root / missing_state["current"]["chain"]["path"]
         shutil.rmtree(missing_path)
         missing_before = tree_hash(missing_root)
 
         missing_result = self.run_state_command("sync-state", missing_root, ok=False)
 
-        self.assertIn("active stage directory", missing_result.stderr)
+        self.assertIn("active chain directory", missing_result.stderr)
         self.assertNotIn("Traceback", missing_result.stderr)
         self.assertEqual(tree_hash(missing_root), missing_before)
 
-        marker_root = self.init_workspace("--project-name", "bad-stage-marker")
+        marker_root = self.init_workspace("--project-name", "bad-chain-marker")
         self.run_state_command("start-day", marker_root, "--day", "1")
+        self.begin_chain(marker_root, 1, "主线")
         marker_state = self.read_state(marker_root)
-        marker_path = marker_root / marker_state["current"]["stage"]["path"]
+        marker_path = marker_root / marker_state["current"]["chain"]["path"]
         marker_data = json.loads(
-            (marker_path / ".learning-stage.json").read_text(encoding="utf-8")
+            (marker_path / ".learning-chain.json").read_text(encoding="utf-8")
         )
         marker_data["learning_root_id"] = str(uuid.uuid4())
-        (marker_path / ".learning-stage.json").write_text(
+        (marker_path / ".learning-chain.json").write_text(
             json.dumps(marker_data), encoding="utf-8"
         )
         marker_before = tree_hash(marker_root)
 
         marker_result = self.run_state_command("sync-state", marker_root, ok=False)
 
-        self.assertIn("active stage marker", marker_result.stderr)
+        self.assertIn("chain marker", marker_result.stderr)
         self.assertNotIn("Traceback", marker_result.stderr)
         self.assertEqual(tree_hash(marker_root), marker_before)
 
-    def test_active_stage_path_must_match_day_range_and_revision(self) -> None:
+    def test_active_chain_path_must_match_day_order_and_name(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "主线")
         state = self.read_state(root)
-        state["stages"][0]["path"] = "Day01/not-the-generated-name"
-        state["current"]["stage"]["path"] = "Day01/not-the-generated-name"
+        state["chains"][0]["path"] = "Day01/not-the-generated-name"
+        state["current"]["chain"]["path"] = "Day01/not-the-generated-name"
         self.state_path(root).write_text(
             json.dumps(state, ensure_ascii=False), encoding="utf-8"
         )
@@ -1477,7 +1429,7 @@ class WorkspaceCliTests(unittest.TestCase):
 
         result = self.run_state_command("sync-state", root, ok=False)
 
-        self.assertIn("active stage path", result.stderr)
+        self.assertIn("chain path", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(tree_hash(root), before_tree)
 
@@ -1549,8 +1501,12 @@ class WorkspaceCliTests(unittest.TestCase):
         committed_json = self.state_path(root).read_bytes()
         self.assertNotEqual(committed_json, before_json)
         committed = self.read_state(root)
-        stage_path = root / committed["current"]["stage"]["path"]
-        self.assertTrue(stage_path.is_dir())
+        self.assertEqual(committed["days"][0]["status"], "active")
+        self.assertTrue((root / "Day01" / "问题与解答.md").is_file())
+        self.assertTrue((root / "Day01" / "当日总结.md").is_file())
+        self.assertTrue(
+            (root / "Day01" / "当日总览产物" / "当日统一总结.md").is_file()
+        )
 
         module.command_sync_state(SimpleNamespace(learning_root=str(root)))
 
@@ -1630,7 +1586,7 @@ class WorkspaceCliTests(unittest.TestCase):
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         marker.pop("repository")
         marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         source = self.repo / "src" / "main.py"
         commands = (
             ("start-day", ("--learning-root", str(root), "--day", "1")),
@@ -1662,7 +1618,7 @@ class WorkspaceCliTests(unittest.TestCase):
             ),
             (
                 "add-source",
-                ("--stage", str(stage), "--source", str(source)),
+                ("--day-dir", str(day_dir), "--source", str(source)),
             ),
             ("complete-day", ("--learning-root", str(root), "--day", "1")),
             ("sync-state", ("--learning-root", str(root))),
@@ -1696,12 +1652,12 @@ class WorkspaceCliTests(unittest.TestCase):
         self.repo_hash = tree_hash(self.repo)
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         first_source = self.repo / "src" / "main.py"
 
-        first = self.add_source(root, first_source, stage=stage)
-        again = self.add_source(root, first_source, stage=stage)
-        second = self.add_source(root, second_source, stage=stage)
+        first = self.add_source(root, first_source, day_dir=day_dir)
+        again = self.add_source(root, first_source, day_dir=day_dir)
+        second = self.add_source(root, second_source, day_dir=day_dir)
 
         first_dir = Path(first.stdout.strip())
         second_dir = Path(second.stdout.strip())
@@ -1710,12 +1666,13 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertEqual(second_dir.name, "02-service.py")
         self.assertTrue((first_dir / "源码导读.md").is_file())
         self.assertTrue((first_dir / "产物").is_dir())
+        self.assertTrue((first_dir / ".learning-source.json").is_file())
         state = self.read_state(root)
         self.assertEqual(len(state["sources"]), 2)
         self.assertEqual([entry["order"] for entry in state["sources"]], [1, 2])
         self.assertEqual(
-            [entry["stage_id"] for entry in state["sources"]],
-            ["Day01/进度条0-30%", "Day01/进度条0-30%"],
+            [entry["day"] for entry in state["sources"]],
+            [1, 1],
         )
         self.assertEqual(
             [entry["canonical_source_path"] for entry in state["sources"]],
@@ -1723,7 +1680,7 @@ class WorkspaceCliTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["relative_learning_dir"] for entry in state["sources"]],
-            ["Day01/进度条0-30%/01-main.py", "Day01/进度条0-30%/02-service.py"],
+            ["Day01/01-main.py", "Day01/02-service.py"],
         )
 
     def test_same_basename_uses_stable_parent_path_suffix(self) -> None:
@@ -1769,12 +1726,12 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_add_source_rejects_external_escape_and_unsafe_label_without_writes(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         external = self.base / "external.py"
         external.write_text("outside\n", encoding="utf-8")
         before_json = self.state_path(root).read_bytes()
-        before_stage = tree_hash(stage)
-        outside_candidate = stage.parent / "escape"
+        before_day = tree_hash(day_dir)
+        outside_candidate = day_dir.parent / "escape"
         cases = (
             (external, ()),
             (self.repo / "src" / "main.py", ("--label", "../escape")),
@@ -1784,46 +1741,65 @@ class WorkspaceCliTests(unittest.TestCase):
         )
         for source, arguments in cases:
             with self.subTest(source=source, arguments=arguments):
-                self.add_source(root, source, *arguments, stage=stage, ok=False)
+                self.add_source(root, source, *arguments, day_dir=day_dir, ok=False)
                 self.assertEqual(self.state_path(root).read_bytes(), before_json)
-                self.assertEqual(tree_hash(stage), before_stage)
+                self.assertEqual(tree_hash(day_dir), before_day)
                 self.assertFalse(outside_candidate.exists())
 
-    def test_add_source_rejects_sealed_stage_without_mutation(self) -> None:
+    def test_add_source_rejects_non_active_day_dir(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        old_stage = root / "Day01" / "进度条0-30%"
-        self.add_source(root, self.repo / "src" / "main.py", stage=old_stage)
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
         self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
+        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-summary")
+        self.run_state_command("complete-day", root, "--day", "1")
+        day01 = root / "Day01"
         before_json = self.state_path(root).read_bytes()
-        before_stage = tree_hash(old_stage)
+        before_day = tree_hash(day01)
 
         result = self.add_source(
             root,
             self.repo / "src" / "main.py",
             "--label",
             "again.py",
-            stage=old_stage,
+            day_dir=day01,
             ok=False,
         )
 
         self.assertIn("active", result.stderr)
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(old_stage), before_stage)
+        self.assertEqual(tree_hash(day01), before_day)
+
+    def test_add_source_rejects_pending_day_dir(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        pending_day = root / "Day02"
+        before_json = self.state_path(root).read_bytes()
+        before_day = tree_hash(pending_day)
+
+        result = self.add_source(
+            root,
+            self.repo / "src" / "main.py",
+            day_dir=pending_day,
+            ok=False,
+        )
+
+        self.assertIn("active", result.stderr)
+        self.assertEqual(self.state_path(root).read_bytes(), before_json)
+        self.assertEqual(tree_hash(pending_day), before_day)
 
     def test_add_source_rejects_copied_or_forged_learning_root(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
         copied_root = self.base / "copied-learning-root"
         shutil.copytree(root, copied_root)
-        copied_stage = copied_root / "Day01" / "进度条0-30%"
+        copied_day = copied_root / "Day01"
         before_copy = tree_hash(copied_root)
 
         copied = self.add_source(
             copied_root,
             self.repo / "src" / "main.py",
-            stage=copied_stage,
+            day_dir=copied_day,
             ok=False,
         )
 
@@ -1837,7 +1813,7 @@ class WorkspaceCliTests(unittest.TestCase):
         forged = self.add_source(
             root,
             self.repo / "src" / "main.py",
-            stage=root / "Day01" / "进度条0-30%",
+            day_dir=root / "Day01",
             ok=False,
         )
         self.assertIn("learning-root", forged.stderr)
@@ -1877,7 +1853,7 @@ class WorkspaceCliTests(unittest.TestCase):
             result = self.add_source(
                 root_inside,
                 moved_repo / "main.py",
-                stage=root_inside / "Day01" / "进度条0-30%",
+                day_dir=root_inside / "Day01",
                 ok=False,
             )
             self.assertIn("sibling", result.stderr)
@@ -1907,21 +1883,21 @@ class WorkspaceCliTests(unittest.TestCase):
             result = self.add_source(
                 nested_root,
                 repo_outer / "main.py",
-                stage=nested_root / "Day01" / "进度条0-30%",
+                day_dir=nested_root / "Day01",
                 ok=False,
             )
             self.assertIn("sibling", result.stderr)
             self.assertEqual(tree_hash(nested_root), before_nested)
 
-    def test_symlink_escapes_are_rejected_for_stage_add_source_and_resume(self) -> None:
+    def test_symlink_escapes_are_rejected_for_day_add_source_and_resume(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        external_directory = self.base / "external-stage"
+        external_directory = self.base / "external-day"
         external_directory.mkdir()
         sentinel = external_directory / "sentinel.bin"
         sentinel.write_bytes(b"outside")
-        stage_link = root / "Day01" / "stage-link"
-        stage_link.symlink_to(external_directory, target_is_directory=True)
+        day_link = root / "day-link"
+        day_link.symlink_to(external_directory, target_is_directory=True)
         external_source = self.base / "external-source.py"
         external_source.write_text("outside\n", encoding="utf-8")
         source_link = self.repo / "src" / "escape.py"
@@ -1930,10 +1906,10 @@ class WorkspaceCliTests(unittest.TestCase):
         before_json = self.state_path(root).read_bytes()
         before_external = tree_hash(external_directory)
         try:
-            stage_result = self.add_source(
-                root, self.repo / "src" / "main.py", stage=stage_link, ok=False
+            day_result = self.add_source(
+                root, self.repo / "src" / "main.py", day_dir=day_link, ok=False
             )
-            self.assertIn("stage", stage_result.stderr.lower())
+            self.assertIn("symlink", day_result.stderr.lower())
             source_result = self.add_source(root, source_link, ok=False)
             self.assertIn("repository", source_result.stderr)
             resume_result = self.run_state_command(
@@ -1957,10 +1933,10 @@ class WorkspaceCliTests(unittest.TestCase):
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         before_json = self.state_path(root).read_bytes()
-        before_stage = tree_hash(stage)
-        target = stage / "01-main.py"
+        before_day = tree_hash(day_dir)
+        target = day_dir / "01-main.py"
 
         with mock.patch.object(
             module, "replace_authority_json", side_effect=OSError("authority failed")
@@ -1968,52 +1944,52 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 module.command_add_source(
                     SimpleNamespace(
-                        stage=str(stage), source=str(self.repo / "src" / "main.py"), label=None
+                        day_dir=str(day_dir), source=str(self.repo / "src" / "main.py"), label=None
                     )
                 )
 
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(stage), before_stage)
+        self.assertEqual(tree_hash(day_dir), before_day)
         self.assertFalse(target.exists())
 
-    def test_add_source_stage_swap_race_never_writes_through_external_symlink(self) -> None:
+    def test_add_source_day_swap_race_never_writes_through_external_symlink(self) -> None:
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
-        held_stage = stage.parent / ".held-stage"
+        day_dir = root / "Day01"
+        held_day = day_dir.parent / ".held-day"
         external = self.base / "external-race-target"
         external.mkdir()
         sentinel = external / "sentinel.bin"
         sentinel.write_bytes(b"user-owned")
         before_json = self.state_path(root).read_bytes()
-        before_stage = tree_hash(stage)
+        before_day = tree_hash(day_dir)
         before_external = tree_hash(external)
 
-        def swap_stage(_stage: Path) -> None:
-            stage.rename(held_stage)
-            stage.symlink_to(external, target_is_directory=True)
+        def swap_day(_day: Path) -> None:
+            day_dir.rename(held_day)
+            day_dir.symlink_to(external, target_is_directory=True)
 
         try:
             with mock.patch.object(
-                module, "source_creation_seam", side_effect=swap_stage
+                module, "source_creation_seam", side_effect=swap_day
             ):
                 with self.assertRaises(module.WorkspaceError):
                     module.command_add_source(
                         SimpleNamespace(
-                            stage=str(stage),
+                            day_dir=str(day_dir),
                             source=str(self.repo / "src" / "main.py"),
                             label=None,
                         )
                     )
         finally:
-            if stage.is_symlink():
-                stage.unlink()
-            if held_stage.exists():
-                held_stage.rename(stage)
+            if day_dir.is_symlink():
+                day_dir.unlink()
+            if held_day.exists():
+                held_day.rename(day_dir)
 
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(stage), before_stage)
+        self.assertEqual(tree_hash(day_dir), before_day)
         self.assertEqual(tree_hash(external), before_external)
         self.assertEqual(sentinel.read_bytes(), b"user-owned")
         self.assertFalse(any(path.name.startswith(".01-main.py.tmp-") for path in external.iterdir()))
@@ -2023,44 +1999,43 @@ class WorkspaceCliTests(unittest.TestCase):
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         before_json = self.state_path(root).read_bytes()
-        before_stage = tree_hash(stage)
+        before_day = tree_hash(day_dir)
 
         with mock.patch.object(module.os, "supports_dir_fd", set()):
             with self.assertRaisesRegex(module.WorkspaceError, "dir_fd"):
                 module.command_add_source(
                     SimpleNamespace(
-                        stage=str(stage),
+                        day_dir=str(day_dir),
                         source=str(self.repo / "src" / "main.py"),
                         label=None,
                     )
                 )
 
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual(tree_hash(stage), before_stage)
+        self.assertEqual(tree_hash(day_dir), before_day)
 
     def test_temp_cleanup_preserves_replacement_when_temp_name_identity_changes(self) -> None:
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
-        moved_temp = stage / ".moved-generated-temp"
+        day_dir = root / "Day01"
+        moved_temp = day_dir / ".moved-generated-temp"
         before_json = self.state_path(root).read_bytes()
-        stage_marker_before = (stage / ".learning-stage.json").read_bytes()
         replacement_name: list[str] = []
 
-        def replace_temp(stage_fd: int, temp_name: str, temp_fd: int) -> None:
+        def replace_temp(day_fd: int, temp_name: str, temp_fd: int) -> None:
             del temp_fd
             os.rename(
                 temp_name,
                 moved_temp.name,
-                src_dir_fd=stage_fd,
-                dst_dir_fd=stage_fd,
+                src_dir_fd=day_fd,
+                dst_dir_fd=day_fd,
             )
-            os.mkdir(temp_name, dir_fd=stage_fd)
+            os.mkdir(temp_name, dir_fd=day_fd)
             replacement_name.append(temp_name)
-            (stage / temp_name / "USER-DATA").write_bytes(b"preserve replacement")
+            (day_dir / temp_name / "USER-DATA").write_bytes(b"preserve replacement")
             raise OSError("injected write failure after temp replacement")
 
         with mock.patch.object(
@@ -2069,28 +2044,26 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.assertRaisesRegex(module.WorkspaceError, "residue"):
                 module.command_add_source(
                     SimpleNamespace(
-                        stage=str(stage),
+                        day_dir=str(day_dir),
                         source=str(self.repo / "src" / "main.py"),
                         label=None,
                     )
                 )
 
-        replacement = stage / replacement_name[0]
+        replacement = day_dir / replacement_name[0]
         self.assertEqual((replacement / "USER-DATA").read_bytes(), b"preserve replacement")
         self.assertTrue(moved_temp.is_dir())
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual((stage / ".learning-stage.json").read_bytes(), stage_marker_before)
-        self.assertFalse((stage / "01-main.py").exists())
+        self.assertFalse((day_dir / "01-main.py").exists())
 
     def test_precommit_cleanup_preserves_replacement_with_forged_exact_marker(self) -> None:
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
-        target = stage / "01-main.py"
-        moved_generated = stage / ".moved-generated-source"
+        day_dir = root / "Day01"
+        target = day_dir / "01-main.py"
+        moved_generated = day_dir / ".moved-generated-source"
         before_json = self.state_path(root).read_bytes()
-        stage_marker_before = (stage / ".learning-stage.json").read_bytes()
 
         def replace_published_then_fail(path: Path, content: str) -> None:
             del path, content
@@ -2111,7 +2084,7 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.assertRaisesRegex(module.WorkspaceError, "residue"):
                 module.command_add_source(
                     SimpleNamespace(
-                        stage=str(stage),
+                        day_dir=str(day_dir),
                         source=str(self.repo / "src" / "main.py"),
                         label=None,
                     )
@@ -2120,24 +2093,23 @@ class WorkspaceCliTests(unittest.TestCase):
         self.assertEqual((target / "USER-DATA").read_bytes(), b"preserve forged replacement")
         self.assertTrue(moved_generated.is_dir())
         self.assertEqual(self.state_path(root).read_bytes(), before_json)
-        self.assertEqual((stage / ".learning-stage.json").read_bytes(), stage_marker_before)
         self.assertEqual(self.read_state(root)["sources"], [])
 
     def test_add_source_retry_cleans_matching_residue_but_preserves_foreign_target(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         source = self.repo / "src" / "main.py"
-        target = stage / "01-main.py"
+        target = day_dir / "01-main.py"
         state = self.read_state(root)
         target.mkdir()
         (target / ".learning-source.json").write_text(
-            json.dumps(source_marker(state, stage, root, source, target, 1, "main.py")),
+            json.dumps(source_marker(state, day_dir, root, source, target, 1, "main.py")),
             encoding="utf-8",
         )
         (target / "stale.bin").write_bytes(b"generated residue")
 
-        result = self.add_source(root, source, stage=stage)
+        result = self.add_source(root, source, day_dir=day_dir)
 
         self.assertEqual(Path(result.stdout.strip()), target)
         self.assertFalse((target / "stale.bin").exists())
@@ -2145,14 +2117,14 @@ class WorkspaceCliTests(unittest.TestCase):
 
         second_root = self.init_workspace("--project-name", "foreign-source-target")
         self.run_state_command("start-day", second_root, "--day", "1")
-        second_stage = second_root / "Day01" / "进度条0-30%"
-        foreign = second_stage / "01-main.py"
+        second_day = second_root / "Day01"
+        foreign = second_day / "01-main.py"
         foreign.mkdir()
         sentinel = foreign / "sentinel.bin"
         sentinel.write_bytes(b"do-not-delete")
         forged_state = self.read_state(second_root)
         forged_marker = source_marker(
-            forged_state, second_stage, second_root, source, foreign, 1, "main.py"
+            forged_state, second_day, second_root, source, foreign, 1, "main.py"
         )
         forged_marker["learning_root_id"] = str(uuid.uuid4())
         (foreign / ".learning-source.json").write_text(
@@ -2160,44 +2132,32 @@ class WorkspaceCliTests(unittest.TestCase):
         )
         before_json = self.state_path(second_root).read_bytes()
 
-        failed = self.add_source(second_root, source, stage=second_stage, ok=False)
+        failed = self.add_source(second_root, source, day_dir=second_day, ok=False)
 
         self.assertIn("unknown", failed.stderr)
         self.assertEqual(sentinel.read_bytes(), b"do-not-delete")
         self.assertEqual(self.state_path(second_root).read_bytes(), before_json)
 
-    def test_same_source_in_later_stage_gets_new_order_without_mutating_sealed_stage(self) -> None:
+    def test_same_source_readded_in_same_day_returns_existing_dir(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
+        day_dir = root / "Day01"
         source = self.repo / "src" / "main.py"
-        old_stage = root / "Day01" / "进度条0-30%"
-        old_source_dir = Path(self.add_source(root, source, stage=old_stage).stdout.strip())
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
-        old_hash = tree_hash(old_source_dir)
-        new_stage = root / "Day01" / "进度条61-100%"
+        first = self.add_source(root, source, day_dir=day_dir)
+        first_dir = Path(first.stdout.strip())
 
-        new_source_dir = Path(
-            self.add_source(root, source, stage=new_stage).stdout.strip()
-        )
+        second = self.add_source(root, source, day_dir=day_dir, ok=True)
 
-        self.assertEqual(new_source_dir.name, "01-main.py")
-        self.assertNotEqual(new_source_dir, old_source_dir)
-        self.assertEqual(tree_hash(old_source_dir), old_hash)
-        registrations = self.read_state(root)["sources"]
-        self.assertEqual(len(registrations), 2)
-        self.assertEqual(
-            {entry["stage_id"] for entry in registrations},
-            {"Day01/进度条0-30%", "Day01/进度条61-100%"},
-        )
+        self.assertEqual(second.stdout.strip(), first.stdout.strip())
+        self.assertEqual(len(self.read_state(root)["sources"]), 1)
 
     def test_forged_source_records_are_rejected_without_projection_writes(self) -> None:
         mutators = {
             "duplicate identity": lambda state: state["sources"].append(
                 copy.deepcopy(state["sources"][0])
             ),
-            "unknown stage": lambda state: state["sources"][0].__setitem__(
-                "stage_id", "Day01/unknown-stage"
+            "wrong day": lambda state: state["sources"][0].__setitem__(
+                "day", 2
             ),
             "external canonical source": lambda state: state["sources"][0].__setitem__(
                 "canonical_source_path", str((self.base / "external.py").resolve())
@@ -2227,16 +2187,16 @@ class WorkspaceCliTests(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(tree_hash(root), before_tree)
 
-    def test_sealed_stage_corruption_is_rejected_by_every_state_command(self) -> None:
+    def test_sealed_chain_corruption_is_rejected_by_every_state_command(self) -> None:
         source = self.repo / "src" / "main.py"
         corruption_kinds = ("missing", "symlink", "forged marker")
         for index, corruption in enumerate(corruption_kinds, start=1):
             with self.subTest(corruption=corruption):
                 root = self.init_workspace("--project-name", f"sealed-corrupt-{index}")
                 self.run_state_command("start-day", root, "--day", "1")
-                self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-                self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
-                sealed = root / "Day01" / "进度条0-30%"
+                self.begin_chain(root, 1, "主线")
+                self.begin_chain(root, 1, "第二链")  # seals 主线
+                sealed = root / "Day01" / "01-主线"
                 external = self.base / f"sealed-external-{index}"
                 external_hash = None
                 if corruption == "missing":
@@ -2246,7 +2206,7 @@ class WorkspaceCliTests(unittest.TestCase):
                     sealed.symlink_to(external, target_is_directory=True)
                     external_hash = tree_hash(external)
                 else:
-                    marker_path = sealed / ".learning-stage.json"
+                    marker_path = sealed / ".learning-chain.json"
                     marker = json.loads(marker_path.read_text(encoding="utf-8"))
                     marker["learning_root_id"] = str(uuid.uuid4())
                     marker_path.write_text(json.dumps(marker), encoding="utf-8")
@@ -2257,15 +2217,15 @@ class WorkspaceCliTests(unittest.TestCase):
                     ("complete-checkpoint", ("--checkpoint", "d1-summary")),
                     (
                         "reopen-checkpoint",
-                        ("--checkpoint", "d1-entry", "--reason", "corrupt sealed stage"),
+                        ("--checkpoint", "d1-entry", "--reason", "corrupt sealed chain"),
                     ),
                     ("set-resume", ("--source", str(source), "--marker", "entry")),
                     ("complete-day", ("--day", "1")),
                     (
                         "add-source",
                         (
-                            "--stage",
-                            str(root / "Day01" / "进度条61-100%"),
+                            "--day-dir",
+                            str(root / "Day01"),
                             "--source",
                             str(source),
                         ),
@@ -2279,7 +2239,7 @@ class WorkspaceCliTests(unittest.TestCase):
                             result = self.run_state_command(
                                 command, root, *arguments, ok=False
                             )
-                        self.assertIn("stage", result.stderr.lower())
+                        self.assertIn("chain", result.stderr.lower())
                         self.assertNotIn("Traceback", result.stderr)
                         self.assertEqual(tree_hash(root), before_tree)
                         if external_hash is not None:
@@ -2295,6 +2255,7 @@ class WorkspaceCliTests(unittest.TestCase):
         for command in (
             "init",
             "start-day",
+            "begin-chain",
             "complete-checkpoint",
             "reopen-checkpoint",
             "set-resume",
@@ -2304,6 +2265,22 @@ class WorkspaceCliTests(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.run_cli(command, "--help")
                 self.assertEqual(result.returncode, 0)
+
+    def test_help_lists_begin_chain_and_day_dir_flag(self) -> None:
+        root_help = self.run_cli("--help")
+        self.assertIn("begin-chain", root_help.stdout)
+        self.assertIn("register-artifact", root_help.stdout)
+        self.assertIn("add-source", root_help.stdout)
+
+        add_source_help = self.run_cli("add-source", "--help")
+        self.assertEqual(add_source_help.returncode, 0)
+        self.assertIn("--day-dir", add_source_help.stdout)
+        self.assertIn("--label", add_source_help.stdout)
+
+        begin_chain_help = self.run_cli("begin-chain", "--help")
+        self.assertEqual(begin_chain_help.returncode, 0)
+        self.assertIn("--day", begin_chain_help.stdout)
+        self.assertIn("--name", begin_chain_help.stdout)
 
     def test_register_source_artifact_records_and_projects_idempotently(self) -> None:
         root = self.init_workspace()
@@ -2341,7 +2318,7 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_register_day_overview_artifact_records_in_overview_markdown(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        overview = root / "Day01" / "进度条0-30%" / "当日总览产物"
+        overview = root / "Day01" / "当日总览产物"
         artifact = overview / "day-framework.svg"
         artifact.write_text("<svg/>\n", encoding="utf-8")
 
@@ -2350,10 +2327,31 @@ class WorkspaceCliTests(unittest.TestCase):
         state = self.read_state(root)
         self.assertEqual(len(state["artifacts"]), 1)
         self.assertEqual(
-            state["artifacts"][0]["owner_id"], "day-overview:Day01/进度条0-30%"
+            state["artifacts"][0]["owner_id"], "day-overview:1"
         )
         summary = (overview / "当日统一总结.md").read_text(encoding="utf-8")
         self.assertIn("`day-framework.svg`", summary)
+
+    def test_register_chain_artifact_records_without_markdown_projection(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "主线")
+        chain_dir = root / "Day01" / "01-主线"
+        chain_artifacts = chain_dir / "产物"
+        artifact = chain_artifacts / "call-tree.dot"
+        artifact.write_text("digraph {}\n", encoding="utf-8")
+
+        self.register_artifact(root, "chain", chain_artifacts, artifact)
+
+        state = self.read_state(root)
+        self.assertEqual(len(state["artifacts"]), 1)
+        record = state["artifacts"][0]
+        self.assertEqual(record["owner_kind"], "chain")
+        self.assertEqual(record["owner_id"], "chain:Day01/01-主线")
+        self.assertEqual(record["relative_owner_dir"], "Day01/01-主线/产物")
+        self.assertEqual(record["relative_artifact_path"], "call-tree.dot")
+        brief = (chain_dir / "链说明.md").read_text(encoding="utf-8")
+        self.assertNotIn("call-tree.dot", brief)
 
     def test_register_artifact_rejects_unsafe_owner_and_artifact_inputs(self) -> None:
         root = self.init_workspace()
@@ -2372,7 +2370,7 @@ class WorkspaceCliTests(unittest.TestCase):
         artifact_link.symlink_to(outside)
         owner_link = self.base / "owner-link"
         owner_link.symlink_to(source_dir, target_is_directory=True)
-        unregistered = root / "Day01" / "进度条0-30%" / "99-unregistered"
+        unregistered = root / "Day01" / "99-unregistered"
         unregistered.mkdir()
         before = self.state_path(root).read_bytes()
 
@@ -2393,21 +2391,37 @@ class WorkspaceCliTests(unittest.TestCase):
     def test_register_artifact_rejects_sealed_source_and_day_owner(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py", stage=stage).stdout.strip()
+            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
         )
         source_artifact = source_dir / "产物" / "sealed.html"
         source_artifact.write_text("sealed\n", encoding="utf-8")
-        overview = stage / "当日总览产物"
+        overview = day_dir / "当日总览产物"
         day_artifact = overview / "sealed.svg"
         day_artifact.write_text("sealed\n", encoding="utf-8")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
+        for cp in ("d1-entry", "d1-flow", "d1-summary"):
+            self.run_state_command("complete-checkpoint", root, "--checkpoint", cp)
+        self.run_state_command("complete-day", root, "--day", "1")
 
         before = self.state_path(root).read_bytes()
         self.register_artifact(root, "source", source_dir, source_artifact, ok=False)
         self.register_artifact(root, "day-overview", overview, day_artifact, ok=False)
+        self.assertEqual(self.state_path(root).read_bytes(), before)
+
+    def test_register_artifact_rejects_sealed_chain_owner(self) -> None:
+        root = self.init_workspace()
+        self.run_state_command("start-day", root, "--day", "1")
+        self.begin_chain(root, 1, "主线")
+        chain_artifacts = root / "Day01" / "01-主线" / "产物"
+        artifact = chain_artifacts / "old.html"
+        artifact.write_text("old\n", encoding="utf-8")
+        # Seal it by starting a second chain
+        self.begin_chain(root, 1, "第二链")
+        before = self.state_path(root).read_bytes()
+
+        self.register_artifact(root, "chain", chain_artifacts, artifact, ok=False)
+
         self.assertEqual(self.state_path(root).read_bytes(), before)
 
     def test_register_artifact_requires_exactly_one_managed_block(self) -> None:
@@ -2517,9 +2531,9 @@ class WorkspaceCliTests(unittest.TestCase):
         self.register_artifact(root, "source", source_dir, artifact)
         state = self.read_state(root)
         duplicate = copy.deepcopy(state["artifacts"][0])
-        duplicate["owner_id"] = "day-overview:Day01/进度条0-30%"
+        duplicate["owner_id"] = "day-overview:1"
         duplicate["owner_kind"] = "day-overview"
-        duplicate["relative_owner_dir"] = "Day01/进度条0-30%/当日总览产物"
+        duplicate["relative_owner_dir"] = "Day01/当日总览产物"
         state["artifacts"].append(duplicate)
         self.state_path(root).write_text(
             json.dumps(state, ensure_ascii=False), encoding="utf-8"
@@ -2620,23 +2634,23 @@ class WorkspaceCliTests(unittest.TestCase):
                         artifact.read_text(encoding="utf-8"), "replacement artifact\n"
                     )
 
-    def test_registered_artifacts_remain_valid_after_owner_stage_is_sealed(self) -> None:
+    def test_registered_artifacts_remain_valid_after_owner_chain_is_sealed(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
-        )
-        artifact = source_dir / "产物" / "durable.html"
+        self.begin_chain(root, 1, "主线")
+        chain_dir = root / "Day01" / "01-主线"
+        chain_artifacts = chain_dir / "产物"
+        artifact = chain_artifacts / "durable.html"
         artifact.write_text("durable\n", encoding="utf-8")
-        self.register_artifact(root, "source", source_dir, artifact)
+        self.register_artifact(root, "chain", chain_artifacts, artifact)
 
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
+        self.begin_chain(root, 1, "第二链")  # seals 主线
         self.run_state_command("sync-state", root)
 
         state = self.read_state(root)
         self.assertEqual(len(state["artifacts"]), 1)
-        self.assertEqual(state["stages"][0]["status"], "sealed")
+        self.assertEqual(state["chains"][0]["status"], "sealed")
+        self.assertEqual(state["chains"][0]["path"], "Day01/01-主线")
 
     def test_register_artifact_fails_closed_without_dir_fd_primitives(self) -> None:
         module = load_cli_module()
@@ -2772,65 +2786,40 @@ class WorkspaceCliTests(unittest.TestCase):
                 self.assertEqual(self.state_path(root).read_bytes(), before_json)
                 self.assertEqual(guide.read_bytes(), before_guide)
 
-    def test_projection_retry_is_allowed_after_owner_stage_becomes_sealed(self) -> None:
+    def test_projection_retry_is_allowed_after_owner_chain_becomes_sealed(self) -> None:
         module = load_cli_module()
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
-        source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py", stage=stage).stdout.strip()
+        self.begin_chain(root, 1, "主线")
+        chain_dir = root / "Day01" / "01-主线"
+        chain_artifacts = chain_dir / "产物"
+        artifact = chain_artifacts / "chain-repair.html"
+        artifact.write_text("artifact\n", encoding="utf-8")
+        namespace = SimpleNamespace(
+            learning_root=str(root),
+            owner_kind="chain",
+            owner_dir=str(chain_artifacts),
+            artifact=str(artifact),
         )
-        overview = stage / "当日总览产物"
-        registrations = (
-            (
-                SimpleNamespace(
-                    learning_root=str(root),
-                    owner_kind="source",
-                    owner_dir=str(source_dir),
-                    artifact=str(source_dir / "产物" / "source-repair.html"),
-                ),
-                source_dir / "源码导读.md",
-                "source-repair.html",
-            ),
-            (
-                SimpleNamespace(
-                    learning_root=str(root),
-                    owner_kind="day-overview",
-                    owner_dir=str(overview),
-                    artifact=str(overview / "day-repair.svg"),
-                ),
-                overview / "当日统一总结.md",
-                "day-repair.svg",
-            ),
-        )
-        for namespace, _markdown, _name in registrations:
-            Path(namespace.artifact).write_text("artifact\n", encoding="utf-8")
-            with mock.patch.object(
-                module, "replace_owner_markdown", side_effect=OSError("projection")
-            ):
-                with self.assertRaisesRegex(module.WorkspaceError, "authoritative JSON"):
-                    module.command_register_artifact(namespace)
-        self.assertEqual(len(self.read_state(root)["artifacts"]), 2)
 
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-entry")
-        self.run_state_command("complete-checkpoint", root, "--checkpoint", "d1-flow")
-        self.assertEqual(self.read_state(root)["stages"][0]["status"], "sealed")
+        # Chain owner has no markdown projection — registration succeeds atomically.
+        module.command_register_artifact(namespace)
+        self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
 
-        for namespace, markdown, name in registrations:
-            with markdown.open("ab") as handle:
-                handle.write(b"\nHUMAN AFTER SEAL\n")
-            module.command_register_artifact(namespace)
-            projected = markdown.read_bytes()
-            self.assertIn(b"HUMAN AFTER SEAL", projected)
-            self.assertEqual(projected.count(name.encode("utf-8")), 1)
-        self.assertEqual(len(self.read_state(root)["artifacts"]), 2)
+        self.begin_chain(root, 1, "第二链")  # seals 主线
+        state = self.read_state(root)
+        self.assertEqual(state["chains"][0]["status"], "sealed")
+
+        # Retry is still allowed — the chain artifact has no markdown to project
+        module.command_register_artifact(namespace)
+        self.assertEqual(len(self.read_state(root)["artifacts"]), 1)
 
     def test_artifact_physical_identity_is_unique_and_replacement_is_rejected(self) -> None:
         root = self.init_workspace()
         self.run_state_command("start-day", root, "--day", "1")
-        stage = root / "Day01" / "进度条0-30%"
+        day_dir = root / "Day01"
         source_dir = Path(
-            self.add_source(root, self.repo / "src" / "main.py", stage=stage).stdout.strip()
+            self.add_source(root, self.repo / "src" / "main.py").stdout.strip()
         )
         original = source_dir / "产物" / "CaseFlow.HTML"
         alias = source_dir / "产物" / "caseflow.html"
@@ -2848,7 +2837,7 @@ class WorkspaceCliTests(unittest.TestCase):
         metadata = original.stat()
         self.assertEqual(record["artifact_device"], metadata.st_dev)
         self.assertEqual(record["artifact_inode"], metadata.st_ino)
-        overview = stage / "当日总览产物"
+        overview = day_dir / "当日总览产物"
         second_owner_alias = overview / "same-physical.html"
         os.link(original, second_owner_alias)
         self.register_artifact(
@@ -3006,6 +2995,7 @@ class WorkspaceCliTests(unittest.TestCase):
         for command in (
             "init",
             "start-day",
+            "begin-chain",
             "complete-checkpoint",
             "reopen-checkpoint",
             "set-resume",

@@ -23,10 +23,9 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
-DEFAULT_STAGE_RANGES = [[0, 30], [31, 60], [61, 100]]
-STAGE_MARKER_KIND = "source-code-learning-stage"
-STAGE_MARKER_VERSION = 1
+SCHEMA_VERSION = 2
+CHAIN_MARKER_KIND = "source-code-learning-chain"
+CHAIN_MARKER_VERSION = 1
 SOURCE_MARKER_KIND = "source-code-learning-source"
 SOURCE_MARKER_VERSION = 1
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "templates"
@@ -584,34 +583,10 @@ def validate_roadmap(data: dict) -> dict:
         if total_weight != 100:
             raise WorkspaceError(f"Day {expected_day} checkpoint weights must total 100")
 
-    if "stage_ranges" not in normalized:
-        normalized["stage_ranges"] = copy.deepcopy(DEFAULT_STAGE_RANGES)
-    ranges = normalized["stage_ranges"]
-    if not isinstance(ranges, list) or not ranges:
-        raise WorkspaceError("stage_ranges must be a non-empty list")
-    previous_end: int | None = None
-    for index, interval in enumerate(ranges):
-        if not isinstance(interval, (list, tuple)) or len(interval) != 2:
-            raise WorkspaceError("each stage range must contain two bounds")
-        start, end = interval
-        if type(start) is not int or type(end) is not int:
-            raise WorkspaceError("stage range bounds must be integers")
-        if not (0 <= start <= end <= 100):
-            raise WorkspaceError("stage range bounds must be within 0..100")
-        if index == 0 and start != 0:
-            raise WorkspaceError("stage ranges must start at 0")
-        if previous_end is not None and start != previous_end + 1:
-            raise WorkspaceError("stage ranges must be ordered, adjacent, and non-overlapping")
-        previous_end = end
-        normalized["stage_ranges"][index] = [start, end]
-    if previous_end != 100:
-        raise WorkspaceError("stage ranges must end at 100")
-
     return normalized
 
 
 def render_roadmap(data: dict, project_name: str, repository_identity: str) -> str:
-    range_lines = [f"- {start}-{end}%" for start, end in data["stage_ranges"]]
     day_sections: list[str] = []
     for day in data["days"]:
         lines = [f"## Day {day['day']}｜{day['title']}", ""]
@@ -626,7 +601,6 @@ def render_roadmap(data: dict, project_name: str, repository_identity: str) -> s
             "ROUTE_TITLE": data["title"],
             "PROJECT_NAME": project_name,
             "REPOSITORY_IDENTITY": repository_identity,
-            "STAGE_RANGES": "\n".join(range_lines),
             "DAYS": "\n\n".join(day_sections),
         },
     )
@@ -646,11 +620,11 @@ def render_state(state: dict) -> str:
             )
         checkpoint_lines.append("")
     progress = current.get("progress", 0)
-    filled = min(10, max(0, progress // 10))
-    progress_bar = "[" + "#" * filled + "-" * (10 - filled) + "]"
-    active_stage = current.get("stage")
-    active_stage_text = active_stage.get("path", "未开始") if active_stage else "未开始"
-    sealed = [entry["path"] for entry in state.get("stages", []) if entry.get("status") == "sealed"]
+    active_chain = current.get("chain")
+    active_chain_text = (
+        active_chain.get("path", "未开始") if active_chain else "未开始"
+    )
+    sealed = [entry["path"] for entry in state.get("chains", []) if entry.get("status") == "sealed"]
     active_day = next(
         (day for day in state["days"] if day.get("status") == "active"), None
     )
@@ -667,9 +641,8 @@ def render_state(state: dict) -> str:
             "LEARNING_ROOT_ID": state["learning_root_id"],
             "CURRENT_DAY": day_text,
             "CURRENT_STATUS": current_status,
-            "PROGRESS_BAR": progress_bar,
             "CURRENT_PROGRESS": progress,
-            "ACTIVE_STAGE": active_stage_text,
+            "ACTIVE_STAGE": active_chain_text,
             "SEALED_STAGES": "、".join(sealed) if sealed else "无",
             "LAST_SOURCE": current.get("last_source") or "无",
             "RESUME_MARKER": current.get("resume_marker") or "无",
@@ -765,17 +738,16 @@ def _initial_state(
         "repository": str(repository),
         "route_title": normalized["title"],
         "route_days": len(days),
-        "stage_ranges": copy.deepcopy(normalized["stage_ranges"]),
         "days": days,
         "current": {
             "day": None,
-            "stage": None,
+            "chain": None,
             "progress": 0,
             "last_source": None,
             "resume_marker": "",
             "closed_flows": [],
         },
-        "stages": [],
+        "chains": [],
         "sources": [],
         "artifacts": [],
         "history": [],
@@ -849,35 +821,8 @@ def _validated_day_directory(root: Path, state: dict, day: int) -> Path:
     return day_directory
 
 
-def _validate_stage_ranges(ranges: Any) -> list[list[int]]:
-    if not isinstance(ranges, list) or not ranges:
-        raise WorkspaceError("state stage_ranges must be a non-empty list")
-    normalized: list[list[int]] = []
-    previous_end: int | None = None
-    for index, bounds in enumerate(ranges):
-        if not isinstance(bounds, list) or len(bounds) != 2:
-            raise WorkspaceError("invalid stage range in state")
-        start, end = bounds
-        if type(start) is not int or type(end) is not int or not (0 <= start <= end <= 100):
-            raise WorkspaceError("invalid stage range in state")
-        if index == 0 and start != 0:
-            raise WorkspaceError("state stage ranges must start at 0")
-        if previous_end is not None and start != previous_end + 1:
-            raise WorkspaceError("state stage ranges must be adjacent")
-        normalized.append([start, end])
-        previous_end = end
-    if previous_end != 100:
-        raise WorkspaceError("state stage ranges must end at 100")
-    return normalized
-
-
-def stage_range_for(progress: int, ranges: list[list[int]]) -> list[int]:
-    if type(progress) is not int or not 0 <= progress <= 100:
-        raise WorkspaceError("progress must be an integer from 0 to 100")
-    for start, end in _validate_stage_ranges(ranges):
-        if start <= progress <= end:
-            return [start, end]
-    raise WorkspaceError(f"no stage range contains progress {progress}")
+def _chain_name(order: int, name: str) -> str:
+    return f"{order:02d}-{name}"
 
 
 def _progress_for(day: dict) -> int:
@@ -934,7 +879,6 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         raise WorkspaceError("state Day metadata is invalid")
     if len(days) != route_days:
         raise WorkspaceError("state route_days does not match Days")
-    _validate_stage_ranges(state.get("stage_ranges"))
 
     active_days: list[dict] = []
     seen_pending = False
@@ -1003,79 +947,86 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
     if len(active_days) > 1:
         raise WorkspaceError("state contains more than one active Day")
 
-    stages = state.get("stages")
-    if not isinstance(stages, list):
-        raise WorkspaceError("state stages must be a list")
-    active_stages = []
-    stage_paths: set[str] = set()
-    for stage in stages:
-        if not isinstance(stage, dict) or stage.get("status") not in {"active", "sealed"}:
-            raise WorkspaceError("invalid stage record")
-        if type(stage.get("day")) is not int or not 1 <= stage["day"] <= route_days:
-            raise WorkspaceError("invalid stage Day")
-        bounds = stage.get("range")
-        if bounds not in state["stage_ranges"]:
-            raise WorkspaceError("stage record uses an unknown range")
-        if type(stage.get("revision")) is not int or stage["revision"] < 0:
-            raise WorkspaceError("invalid stage revision")
-        relative = stage.get("path")
-        if not isinstance(relative, str) or not relative or relative in stage_paths:
-            raise WorkspaceError("invalid or duplicate stage path")
+    chains = state.get("chains")
+    if not isinstance(chains, list):
+        raise WorkspaceError("state chains must be a list")
+    active_chains = []
+    chain_paths: set[str] = set()
+    chains_by_day: dict[int, list[dict]] = {}
+    for chain in chains:
+        if not isinstance(chain, dict) or chain.get("status") not in {"active", "sealed"}:
+            raise WorkspaceError("invalid chain record")
+        if type(chain.get("day")) is not int or not 1 <= chain["day"] <= route_days:
+            raise WorkspaceError("invalid chain Day")
+        if type(chain.get("order")) is not int or chain["order"] <= 0:
+            raise WorkspaceError("invalid chain order")
+        if not isinstance(chain.get("name"), str) or not chain["name"].strip():
+            raise WorkspaceError("chain name must be non-empty text")
+        relative = chain.get("path")
+        if not isinstance(relative, str) or not relative or relative in chain_paths:
+            raise WorkspaceError("invalid or duplicate chain path")
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise WorkspaceError("unsafe stage path")
-        stage_paths.add(relative)
-        if stage["status"] == "active":
-            active_stages.append(stage)
+            raise WorkspaceError("unsafe chain path")
+        expected_relative = (
+            _day_directory(root, state, chain["day"])
+            / _chain_name(chain["order"], chain["name"])
+        ).relative_to(root).as_posix()
+        if relative != expected_relative:
+            raise WorkspaceError(
+                "chain path does not match its Day, order, and name"
+            )
+        chain_paths.add(relative)
+        chains_by_day.setdefault(chain["day"], []).append(chain)
+        if chain["status"] == "active":
+            active_chains.append(chain)
         else:
-            expected_stage_path = (
-                _day_directory(root, state, stage["day"])
-                / _stage_name(stage["range"], stage["revision"])
-            )
-            actual_stage_path = root / relative_path
-            if actual_stage_path != expected_stage_path:
-                raise WorkspaceError(
-                    "sealed stage path does not match its Day, range, and revision"
-                )
-            if actual_stage_path.is_symlink() or not actual_stage_path.is_dir():
-                raise WorkspaceError("sealed stage directory is missing or invalid")
+            actual_chain_path = root / relative_path
+            if actual_chain_path.is_symlink() or not actual_chain_path.is_dir():
+                raise WorkspaceError("sealed chain directory is missing or invalid")
             try:
-                resolved_stage_path = resolved_under(actual_stage_path, root)
+                resolved_chain_path = resolved_under(actual_chain_path, root)
             except WorkspaceError as exc:
-                raise WorkspaceError("sealed stage directory escapes the learning root") from exc
-            if resolved_stage_path != actual_stage_path:
-                raise WorkspaceError("sealed stage directory must be canonical")
-            expected_marker = _expected_stage_marker(
+                raise WorkspaceError("sealed chain directory escapes the learning root") from exc
+            if resolved_chain_path != actual_chain_path:
+                raise WorkspaceError("sealed chain directory must be canonical")
+            expected_marker = _expected_chain_marker(
                 root_id,
-                stage["day"],
-                stage["range"],
-                stage["revision"],
+                chain["day"],
+                chain["order"],
+                chain["name"],
             )
             try:
-                actual_marker = read_json(actual_stage_path / ".learning-stage.json")
+                actual_marker = read_json(actual_chain_path / ".learning-chain.json")
             except WorkspaceError as exc:
-                raise WorkspaceError("sealed stage marker is missing or invalid") from exc
+                raise WorkspaceError("sealed chain marker is missing or invalid") from exc
             if actual_marker != expected_marker:
                 raise WorkspaceError(
-                    "sealed stage marker does not match authoritative state"
+                    "sealed chain marker does not match authoritative state"
                 )
+
+    for day_number, day_chains in chains_by_day.items():
+        orders = sorted(chain["order"] for chain in day_chains)
+        if orders != list(range(1, len(orders) + 1)):
+            raise WorkspaceError(
+                f"chain orders are not consecutive in Day {day_number}"
+            )
 
     source_identities: set[tuple[str, str]] = set()
     source_paths: set[str] = set()
     source_orders: dict[str, set[int]] = {}
-    stages_by_id = {stage["path"]: stage for stage in stages}
     for source_record in state["sources"]:
         if not isinstance(source_record, dict):
             raise WorkspaceError("invalid source record")
-        stage_id = source_record.get("stage_id")
+        source_day = source_record.get("day")
         canonical_source_text = source_record.get("canonical_source_path")
         relative_source_text = source_record.get("repository_relative_path")
         relative_learning_text = source_record.get("relative_learning_dir")
         order = source_record.get("order")
         label = source_record.get("label")
         created_at = source_record.get("created_at")
-        if not isinstance(stage_id, str) or stage_id not in stages_by_id:
-            raise WorkspaceError("source record references an unknown stage")
+        if type(source_day) is not int or not 1 <= source_day <= route_days:
+            raise WorkspaceError("source record Day is invalid")
         if not isinstance(canonical_source_text, str):
             raise WorkspaceError("source record canonical path is invalid")
         try:
@@ -1100,20 +1051,21 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         relative_learning = Path(relative_learning_text)
         if relative_learning.is_absolute() or ".." in relative_learning.parts:
             raise WorkspaceError("source record learning directory is unsafe")
-        if relative_learning.parent.as_posix() != stage_id:
-            raise WorkspaceError("source record is outside its stage")
+        day_directory_text = _day_directory(root, state, source_day).relative_to(root).as_posix()
+        if relative_learning.parent.as_posix() != day_directory_text:
+            raise WorkspaceError("source record is outside its Day")
         if relative_learning.name != f"{order:02d}-{safe_label}":
             raise WorkspaceError("source record directory name does not match its order and label")
-        identity = (stage_id, canonical_source_text)
+        identity = (source_day, canonical_source_text)
         if identity in source_identities:
             raise WorkspaceError("duplicate source identity in state")
         source_identities.add(identity)
         if relative_learning_text in source_paths:
             raise WorkspaceError("duplicate source learning directory in state")
         source_paths.add(relative_learning_text)
-        orders = source_orders.setdefault(stage_id, set())
+        orders = source_orders.setdefault(day_directory_text, set())
         if order in orders:
-            raise WorkspaceError("duplicate source order in stage")
+            raise WorkspaceError("duplicate source order in Day")
         orders.add(order)
 
         source_directory = root / relative_learning
@@ -1127,7 +1079,7 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
             raise WorkspaceError("source learning directory must be canonical")
         expected_source_marker = _expected_source_marker(
             state["learning_root_id"],
-            stage_id,
+            day_directory_text,
             canonical_source_text,
             relative_learning_text,
             order,
@@ -1140,9 +1092,9 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         if actual_source_marker != expected_source_marker:
             raise WorkspaceError("source learning marker does not match authoritative state")
 
-    for stage_id, orders in source_orders.items():
+    for day_directory_text, orders in source_orders.items():
         if orders != set(range(1, len(orders) + 1)):
-            raise WorkspaceError(f"source orders are not consecutive in stage: {stage_id}")
+            raise WorkspaceError(f"source orders are not consecutive in Day: {day_directory_text}")
 
     artifacts_seen: set[str] = set()
     artifact_identities_seen: set[tuple[int, int]] = set()
@@ -1161,7 +1113,7 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
         artifact_device = artifact_record.get("artifact_device")
         artifact_inode = artifact_record.get("artifact_inode")
         registered_at = artifact_record.get("registered_at")
-        if owner_kind not in {"source", "day-overview"}:
+        if owner_kind not in {"source", "day-overview", "chain"}:
             raise WorkspaceError("artifact owner kind is invalid")
         if not isinstance(owner_id, str) or not owner_id:
             raise WorkspaceError("artifact owner ID is invalid")
@@ -1195,26 +1147,57 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
                 raise WorkspaceError("artifact references an unknown source owner")
             if relative_owner_text != source_owner["relative_learning_dir"]:
                 raise WorkspaceError("artifact source owner directory does not match")
-            owner_stage = stages_by_id[source_owner["stage_id"]]
-            if owner_stage.get("status") not in {"active", "sealed"}:
-                raise WorkspaceError("artifact source owner stage status is invalid")
+            owner_day = next(
+                (day for day in state["days"] if day.get("day") == source_owner["day"]),
+                None,
+            )
+            if owner_day is None or owner_day.get("status") not in {"active", "completed"}:
+                raise WorkspaceError("artifact source owner Day status is invalid")
             allowed_directory = root / relative_owner / "产物"
             expected_artifact = root / relative_owner / relative_artifact
             if not relative_artifact.parts or relative_artifact.parts[0] != "产物":
                 raise WorkspaceError("source artifact must be inside its 产物 directory")
-        else:
+        elif owner_kind == "day-overview":
             prefix = "day-overview:"
             if not owner_id.startswith(prefix):
                 raise WorkspaceError("day overview artifact owner ID is invalid")
-            stage_id = owner_id[len(prefix) :]
-            owner_stage = stages_by_id.get(stage_id)
-            if owner_stage is None:
+            day_text = owner_id[len(prefix) :]
+            try:
+                owner_day_number = int(day_text)
+            except ValueError as exc:
+                raise WorkspaceError("day overview artifact owner ID is invalid") from exc
+            owner_day = next(
+                (day for day in state["days"] if day.get("day") == owner_day_number),
+                None,
+            )
+            if owner_day is None:
                 raise WorkspaceError("artifact references an unknown day overview owner")
-            if owner_stage.get("status") not in {"active", "sealed"}:
-                raise WorkspaceError("artifact day owner stage status is invalid")
-            expected_owner_text = f"{stage_id}/当日总览产物"
+            if owner_day.get("status") not in {"active", "completed"}:
+                raise WorkspaceError("artifact day owner Day status is invalid")
+            expected_owner_text = (
+                _day_directory(root, state, owner_day_number).relative_to(root).as_posix()
+                + "/当日总览产物"
+            )
             if relative_owner_text != expected_owner_text:
                 raise WorkspaceError("artifact day owner directory does not match")
+            allowed_directory = root / relative_owner
+            expected_artifact = allowed_directory / relative_artifact
+        else:
+            prefix = "chain:"
+            if not owner_id.startswith(prefix):
+                raise WorkspaceError("chain artifact owner ID is invalid")
+            chain_path = owner_id[len(prefix) :]
+            owner_chain = next(
+                (chain for chain in chains if chain.get("path") == chain_path),
+                None,
+            )
+            if owner_chain is None:
+                raise WorkspaceError("artifact references an unknown chain owner")
+            if owner_chain.get("status") not in {"active", "sealed"}:
+                raise WorkspaceError("artifact chain owner status is invalid")
+            expected_owner_text = f"{chain_path}/产物"
+            if relative_owner_text != expected_owner_text:
+                raise WorkspaceError("artifact chain owner directory does not match")
             allowed_directory = root / relative_owner
             expected_artifact = allowed_directory / relative_artifact
 
@@ -1292,53 +1275,48 @@ def _validate_state_structure(root: Path, state: dict, marker: dict) -> None:
                 "resume source must be a canonical regular file inside the repository"
             )
     current_day = current.get("day")
-    current_stage = current.get("stage")
+    current_chain = current.get("chain")
     if active_days:
         active_day = active_days[0]
         if current_day != active_day["day"]:
             raise WorkspaceError("current Day does not match active Day")
-        if len(active_stages) != 1:
-            raise WorkspaceError("an active Day requires exactly one active stage")
-        active_stage = active_stages[0]
-        if current_stage != active_stage:
-            raise WorkspaceError("current stage does not match active stage")
-        if current.get("progress") != active_day["progress"]:
-            raise WorkspaceError("current progress does not match active Day")
-        if active_stage["day"] != active_day["day"]:
-            raise WorkspaceError("active stage Day does not match the active Day")
-        start, end = active_stage["range"]
-        if not start <= active_day["progress"] <= end:
-            raise WorkspaceError("active stage range does not contain current progress")
-        expected_stage_path = (
-            _day_directory(root, state, active_day["day"])
-            / _stage_name(active_stage["range"], active_stage["revision"])
-        )
-        actual_stage_path = root / active_stage["path"]
-        if actual_stage_path != expected_stage_path:
-            raise WorkspaceError("active stage path does not match its Day, range, and revision")
-        if actual_stage_path.is_symlink() or not actual_stage_path.is_dir():
-            raise WorkspaceError("active stage directory is missing or invalid")
-        try:
-            resolved_stage_path = actual_stage_path.resolve(strict=True)
-        except OSError as exc:
-            raise WorkspaceError("active stage directory is missing or invalid") from exc
-        if resolved_stage_path != actual_stage_path or not _is_within(resolved_stage_path, root):
-            raise WorkspaceError("active stage directory escapes the learning root")
-        try:
-            active_marker = read_json(actual_stage_path / ".learning-stage.json")
-        except WorkspaceError as exc:
-            raise WorkspaceError("active stage marker is missing or invalid") from exc
-        expected_active_marker = _expected_stage_marker(
-            root_id,
-            active_stage["day"],
-            active_stage["range"],
-            active_stage["revision"],
-        )
-        if active_marker != expected_active_marker:
-            raise WorkspaceError("active stage marker does not match authoritative state")
+        if len(active_chains) > 1:
+            raise WorkspaceError("an active Day cannot have more than one active chain")
+        if len(active_chains) == 1:
+            active_chain = active_chains[0]
+            if current_chain != active_chain:
+                raise WorkspaceError("current chain does not match active chain")
+            if current.get("progress") != active_day["progress"]:
+                raise WorkspaceError("current progress does not match active Day")
+            if active_chain["day"] != active_day["day"]:
+                raise WorkspaceError("active chain Day does not match the active Day")
+            actual_chain_path = root / active_chain["path"]
+            if actual_chain_path.is_symlink() or not actual_chain_path.is_dir():
+                raise WorkspaceError("active chain directory is missing or invalid")
+            try:
+                resolved_chain_path = actual_chain_path.resolve(strict=True)
+            except OSError as exc:
+                raise WorkspaceError("active chain directory is missing or invalid") from exc
+            if resolved_chain_path != actual_chain_path or not _is_within(resolved_chain_path, root):
+                raise WorkspaceError("active chain directory escapes the learning root")
+            try:
+                active_marker = read_json(actual_chain_path / ".learning-chain.json")
+            except WorkspaceError as exc:
+                raise WorkspaceError("active chain marker is missing or invalid") from exc
+            expected_active_marker = _expected_chain_marker(
+                root_id,
+                active_chain["day"],
+                active_chain["order"],
+                active_chain["name"],
+            )
+            if active_marker != expected_active_marker:
+                raise WorkspaceError("active chain marker does not match authoritative state")
+        else:
+            if current_chain is not None:
+                raise WorkspaceError("current chain set but no active chain exists")
     else:
-        if current_day is not None or current_stage is not None or active_stages:
-            raise WorkspaceError("inactive state cannot contain a current Day or active stage")
+        if current_day is not None or current_chain is not None or active_chains:
+            raise WorkspaceError("inactive state cannot contain a current Day or active chain")
         if (
             current["progress"] != 0
             or current.get("last_source") is not None
@@ -1379,24 +1357,17 @@ def save_state(root: Path, state: dict) -> None:
         ) from exc
 
 
-def _stage_name(bounds: list[int], revision: int = 0) -> str:
-    name = f"进度条{bounds[0]}-{bounds[1]}%"
-    if revision:
-        name += f"-修订{revision:02d}"
-    return name
-
-
-def _expected_stage_marker(
-    learning_root_id: str, day: int, bounds: list[int], revision: int
+def _expected_chain_marker(
+    learning_root_id: str, day: int, order: int, name: str
 ) -> dict:
     return {
-        "kind": STAGE_MARKER_KIND,
-        "marker_version": STAGE_MARKER_VERSION,
+        "kind": CHAIN_MARKER_KIND,
+        "marker_version": CHAIN_MARKER_VERSION,
         "schema_version": SCHEMA_VERSION,
         "learning_root_id": learning_root_id,
         "day": day,
-        "range": list(bounds),
-        "revision": revision,
+        "order": order,
+        "name": name,
     }
 
 
@@ -1421,18 +1392,18 @@ def _expected_source_marker(
     }
 
 
-def active_stage_record(state: dict, stage: Path) -> dict:
+def active_day_directory(state: dict, day_dir: Path) -> dict:
+    """Validate that day_dir is the active Day's canonical directory and return its record."""
     root = Path(state["learning_root"])
     try:
-        stage_id = Path(stage).relative_to(root).as_posix()
+        relative = Path(day_dir).relative_to(root).as_posix()
     except ValueError as exc:
-        raise WorkspaceError("stage is outside the learning root") from exc
-    matches = [entry for entry in state["stages"] if entry.get("path") == stage_id]
-    if len(matches) != 1 or matches[0].get("status") != "active":
-        raise WorkspaceError("source registration requires the active stage")
-    if state["current"].get("stage") != matches[0]:
-        raise WorkspaceError("stage does not match the current active stage")
-    return matches[0]
+        raise WorkspaceError("Day directory is outside the learning root") from exc
+    active = _active_day(state)
+    expected = _day_directory(root, state, active["day"]).relative_to(root).as_posix()
+    if relative != expected:
+        raise WorkspaceError("source registration requires the active Day directory")
+    return active
 
 
 def source_label(source: Path, repo: Path, requested: str | None, used: set[str]) -> str:
@@ -1454,7 +1425,7 @@ def source_label(source: Path, repo: Path, requested: str | None, used: set[str]
     )
     if candidate not in used:
         return candidate
-    raise WorkspaceError("source label collides with an existing source in this stage")
+    raise WorkspaceError("source label collides with an existing source in this Day")
 
 
 def _owned_source_directory(path: Path, expected_marker: dict) -> bool:
@@ -1483,11 +1454,11 @@ def _remove_owned_source(root: Path, path: Path, expected_marker: dict) -> None:
         shutil.rmtree(path)
 
 
-def source_creation_seam(stage: Path) -> None:
+def source_creation_seam(day_dir: Path) -> None:
     """Test seam immediately before fd-relative source-directory creation."""
 
 
-def source_temp_creation_seam(stage_fd: int, temp_name: str, temp_fd: int) -> None:
+def source_temp_creation_seam(day_fd: int, temp_name: str, temp_fd: int) -> None:
     """Test seam after opening a generated temp directory by stable identity."""
 
 
@@ -1587,17 +1558,18 @@ def _rename_no_replace_at(directory_fd: int, source_name: str, target_name: str)
     raise OSError(error_number, os.strerror(error_number), target_name)
 
 
-def _stable_stage_matches(
-    directory_fd: int, stage: Path, root: Path, expected_marker: dict
+def _stable_day_matches(
+    directory_fd: int, day_dir: Path, root: Path
 ) -> bool:
+    """Day directories have no generated marker; identity is the canonical dir itself."""
     try:
-        if stage.is_symlink() or stage.resolve(strict=True) != stage:
+        if day_dir.is_symlink() or day_dir.resolve(strict=True) != day_dir:
             return False
-        stage.relative_to(root)
-        path_stat = os.stat(stage, follow_symlinks=False)
+        day_dir.relative_to(root)
+        path_stat = os.stat(day_dir, follow_symlinks=False)
         if not os.path.samestat(os.fstat(directory_fd), path_stat):
             return False
-        return _read_json_at(directory_fd, ".learning-stage.json") == expected_marker
+        return True
     except (OSError, ValueError, WorkspaceError):
         return False
 
@@ -1611,19 +1583,19 @@ def _source_entry_exists_at(directory_fd: int, name: str) -> bool:
 
 
 def _remove_generated_source_at(
-    stage_fd: int,
+    day_fd: int,
     name: str,
     expected_marker: dict | None,
     *,
     allow_partial: bool = False,
 ) -> bool:
     try:
-        source_fd = _open_directory_at(stage_fd, name)
+        source_fd = _open_directory_at(day_fd, name)
     except (FileNotFoundError, NotADirectoryError, OSError):
         return False
     try:
         return _remove_generated_source_handle_at(
-            stage_fd,
+            day_fd,
             name,
             source_fd,
             expected_marker,
@@ -1644,7 +1616,7 @@ def _entry_matches_fd(parent_fd: int, name: str, child_fd: int) -> bool:
 
 
 def _remove_generated_source_handle_at(
-    stage_fd: int,
+    day_fd: int,
     name: str,
     source_fd: int,
     expected_marker: dict | None,
@@ -1660,12 +1632,12 @@ def _remove_generated_source_handle_at(
             return False
     elif not allow_partial:
         return False
-    if not _entry_matches_fd(stage_fd, name, source_fd):
+    if not _entry_matches_fd(day_fd, name, source_fd):
         return False
     _clear_directory_at(source_fd)
-    if not _entry_matches_fd(stage_fd, name, source_fd):
+    if not _entry_matches_fd(day_fd, name, source_fd):
         return False
-    os.rmdir(name, dir_fd=stage_fd)
+    os.rmdir(name, dir_fd=day_fd)
     return True
 
 
@@ -1692,16 +1664,16 @@ def _clear_directory_at(directory_fd: int) -> None:
 
 
 def _create_source_directory_at(
-    stage_fd: int,
+    day_fd: int,
     target_name: str,
     expected_marker: dict,
     guide: str,
 ) -> int:
     temporary_name = f".{target_name}.tmp-{uuid.uuid4().hex}"
-    os.mkdir(temporary_name, 0o700, dir_fd=stage_fd)
-    temporary_fd = _open_directory_at(stage_fd, temporary_name)
+    os.mkdir(temporary_name, 0o700, dir_fd=day_fd)
+    temporary_fd = _open_directory_at(day_fd, temporary_name)
     try:
-        source_temp_creation_seam(stage_fd, temporary_name, temporary_fd)
+        source_temp_creation_seam(day_fd, temporary_name, temporary_fd)
         _write_text_at(
             temporary_fd,
             ".learning-source.json",
@@ -1712,7 +1684,7 @@ def _create_source_directory_at(
         os.fsync(temporary_fd)
     except BaseException as exc:
         cleaned = _remove_generated_source_handle_at(
-            stage_fd,
+            day_fd,
             temporary_name,
             temporary_fd,
             None,
@@ -1725,10 +1697,10 @@ def _create_source_directory_at(
             ) from exc
         raise
     try:
-        _rename_no_replace_at(stage_fd, temporary_name, target_name)
+        _rename_no_replace_at(day_fd, temporary_name, target_name)
     except BaseException as exc:
         cleaned = _remove_generated_source_handle_at(
-            stage_fd,
+            day_fd,
             temporary_name,
             temporary_fd,
             expected_marker,
@@ -1743,17 +1715,17 @@ def _create_source_directory_at(
     return temporary_fd
 
 
-def _owned_stage_directory(path: Path, expected_marker: dict) -> bool:
+def _owned_chain_directory(path: Path, expected_marker: dict) -> bool:
     if path.is_symlink() or not path.is_dir():
         return False
     try:
-        marker = read_json(path / ".learning-stage.json")
+        marker = read_json(path / ".learning-chain.json")
     except WorkspaceError:
         return False
     return all(marker.get(key) == value for key, value in expected_marker.items())
 
 
-def _remove_owned_stage(root: Path, path: Path, expected_marker: dict) -> None:
+def _remove_owned_chain(root: Path, path: Path, expected_marker: dict) -> None:
     try:
         parent = path.parent.resolve(strict=True)
     except OSError:
@@ -1765,30 +1737,30 @@ def _remove_owned_stage(root: Path, path: Path, expected_marker: dict) -> None:
         or path.is_symlink()
     ):
         return
-    if _owned_stage_directory(path, expected_marker):
+    if _owned_chain_directory(path, expected_marker):
         shutil.rmtree(path)
 
 
-def _prepare_stage_target(root: Path, state: dict, day: int, bounds: list[int], revision: int) -> Path:
+def _prepare_chain_target(root: Path, state: dict, day: int, order: int, name: str) -> Path:
     day_directory = _validated_day_directory(root, state, day)
-    target = day_directory / _stage_name(bounds, revision)
-    expected_marker = _expected_stage_marker(
-        state["learning_root_id"], day, bounds, revision
+    target = day_directory / _chain_name(order, name)
+    expected_marker = _expected_chain_marker(
+        state["learning_root_id"], day, order, name
     )
-    registered = {root / stage["path"] for stage in state["stages"]}
+    registered = {root / chain["path"] for chain in state["chains"]}
     if target in registered:
-        raise WorkspaceError(f"stage is already registered: {target}")
+        raise WorkspaceError(f"chain is already registered: {target}")
     if target.exists() or target.is_symlink():
-        if _owned_stage_directory(target, expected_marker):
-            _remove_owned_stage(root, target, expected_marker)
+        if _owned_chain_directory(target, expected_marker):
+            _remove_owned_chain(root, target, expected_marker)
             if target.exists() or target.is_symlink():
-                raise WorkspaceError(f"stage target could not be safely cleaned: {target}")
+                raise WorkspaceError(f"chain target could not be safely cleaned: {target}")
         else:
-            raise WorkspaceError(f"stage target is occupied by an unknown directory: {target}")
+            raise WorkspaceError(f"chain target is occupied by an unknown directory: {target}")
     return target
 
 
-def create_stage(root: Path, day: int, bounds: list[int], revision: int = 0) -> Path:
+def create_chain(root: Path, day: int, order: int, name: str) -> Path:
     root = Path(root).resolve(strict=True)
     marker = read_json(root / ".learning-root.json")
     root_id = marker.get("learning_root_id")
@@ -1796,59 +1768,24 @@ def create_stage(root: Path, day: int, bounds: list[int], revision: int = 0) -> 
         raise WorkspaceError("learning-root marker has no valid ID")
     state = read_json(root / "学习状态.json")
     day_directory = _validated_day_directory(root, state, day)
-    target = day_directory / _stage_name(bounds, revision)
+    target = day_directory / _chain_name(order, name)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=day_directory))
     try:
         atomic_write_json(
-            temporary / ".learning-stage.json",
-            _expected_stage_marker(root_id, day, bounds, revision),
-        )
-        day_state = state["days"][day - 1]
-        checkpoint_text = "、".join(
-            f"{checkpoint['id']}:{checkpoint['title']}({checkpoint['weight']}%)"
-            for checkpoint in day_state["checkpoints"]
-        )
-        common = {
-            "TIMESTAMP": _utc_timestamp(),
-            "DAY_NUMBER": day,
-            "STAGE_RANGE": f"{bounds[0]}-{bounds[1]}%",
-            "CHECKPOINTS": checkpoint_text,
-        }
-        materialize_template(
-            "questions-and-answers.md",
-            temporary / "问题与解答.md",
-            {
-                **common,
-                "USER_QUESTION": "待记录",
-                "CONCISE_ANSWER": "待整理",
-                "RELATED_FILE_SYMBOL": "待补充",
-                "UNRESOLVED_FOLLOW_UP": "无",
-            },
+            temporary / ".learning-chain.json",
+            _expected_chain_marker(root_id, day, order, name),
         )
         materialize_template(
-            "day-summary.md",
-            temporary / "当日总结.md",
+            "chain-brief.md",
+            temporary / "链说明.md",
             {
-                **common,
-                "CLOSED_FLOWS": "暂无",
-                "KEY_CONCEPTS": "待整理",
-                "REMAINING_QUESTIONS": "无",
-                "CONTINUATION_POINT": "待设置",
+                "DAY_NUMBER": day,
+                "CHAIN_ORDER": order,
+                "CHAIN_NAME": name,
+                "TIMESTAMP": _utc_timestamp(),
             },
         )
-        overview_directory = temporary / "当日总览产物"
-        overview_directory.mkdir()
-        materialize_template(
-            "day-overview.md",
-            overview_directory / "当日统一总结.md",
-            {
-                **common,
-                "LOCAL_FLOW_ARTIFACT_LINKS": "暂无",
-                "WHOLE_FRAMEWORK_RELATION": "待整理",
-                "CROSS_SOURCE_CONCLUSIONS": "待整理",
-                "ARTIFACTS": "- 暂无已登记产物",
-            },
-        )
+        (temporary / "产物").mkdir()
         _rename_no_replace(temporary, target)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -1856,23 +1793,24 @@ def create_stage(root: Path, day: int, bounds: list[int], revision: int = 0) -> 
     return target
 
 
-def _stage_record(root: Path, path: Path, day: int, bounds: list[int], revision: int) -> dict:
+def _chain_record(root: Path, path: Path, day: int, order: int, name: str) -> dict:
     return {
         "day": day,
-        "range": list(bounds),
-        "revision": revision,
+        "order": order,
+        "name": name,
         "path": path.relative_to(root).as_posix(),
         "status": "active",
         "created_at": _utc_timestamp(),
     }
 
 
-def _seal_active_stage(state: dict) -> None:
-    active = [stage for stage in state["stages"] if stage["status"] == "active"]
+def _seal_active_chain(state: dict) -> None:
+    active = [chain for chain in state["chains"] if chain["status"] == "active"]
     if len(active) != 1:
-        raise WorkspaceError("expected exactly one active stage")
+        raise WorkspaceError("expected exactly one active chain")
     active[0]["status"] = "sealed"
     active[0]["sealed_at"] = _utc_timestamp()
+    state["current"]["chain"] = None
 
 
 def _state_was_committed(root: Path, state: dict) -> bool:
@@ -1882,7 +1820,7 @@ def _state_was_committed(root: Path, state: dict) -> bool:
         return False
 
 
-def _save_with_created_stage(root: Path, state: dict, created: Path) -> None:
+def _save_with_created_chain(root: Path, state: dict, created: Path) -> None:
     try:
         save_state(root, state)
     except BaseException:
@@ -1890,20 +1828,20 @@ def _save_with_created_stage(root: Path, state: dict, created: Path) -> None:
             relative_created = created.relative_to(root).as_posix()
             created_record = next(
                 (
-                    stage
-                    for stage in state["stages"]
-                    if stage.get("path") == relative_created
+                    chain
+                    for chain in state["chains"]
+                    if chain.get("path") == relative_created
                 ),
                 None,
             )
             if created_record is not None:
-                expected_marker = _expected_stage_marker(
+                expected_marker = _expected_chain_marker(
                     state["learning_root_id"],
                     created_record["day"],
-                    created_record["range"],
-                    created_record["revision"],
+                    created_record["order"],
+                    created_record["name"],
                 )
-                _remove_owned_stage(root, created, expected_marker)
+                _remove_owned_chain(root, created, expected_marker)
         raise
 
 
@@ -1925,19 +1863,56 @@ def _checkpoint_in_active_day(state: dict, checkpoint_id: str) -> tuple[dict, di
     raise WorkspaceError(f"checkpoint is not in the active Day: {checkpoint_id}")
 
 
-def _target_stage_revision(state: dict, day: int, bounds: list[int]) -> int:
-    revisions = {
-        stage["revision"]
-        for stage in state["stages"]
-        if stage["day"] == day and stage["range"] == bounds
-    }
-    if 0 not in revisions:
-        return 0
-    return max(revisions) + 1
-
-
 def _append_history(state: dict, event: str, **details: Any) -> None:
     state["history"].append({"event": event, "at": _utc_timestamp(), **details})
+
+
+def _create_day_level_files(day_directory: Path, day: dict) -> None:
+    """Populate a Day directory with its human-authored Day-level files."""
+    checkpoint_text = "；".join(
+        f"{checkpoint['id']}：{checkpoint['title']}（{checkpoint['weight']}%）"
+        for checkpoint in day["checkpoints"]
+    )
+    common = {
+        "TIMESTAMP": _utc_timestamp(),
+        "DAY_NUMBER": day["day"],
+        "CHECKPOINTS": checkpoint_text,
+    }
+    materialize_template(
+        "questions-and-answers.md",
+        day_directory / "问题与解答.md",
+        {
+            **common,
+            "USER_QUESTION": "待记录",
+            "CONCISE_ANSWER": "待整理",
+            "RELATED_FILE_SYMBOL": "待补充",
+            "UNRESOLVED_FOLLOW_UP": "无",
+        },
+    )
+    materialize_template(
+        "day-summary.md",
+        day_directory / "当日总结.md",
+        {
+            **common,
+            "CLOSED_FLOWS": "暂无",
+            "KEY_CONCEPTS": "待整理",
+            "REMAINING_QUESTIONS": "无",
+            "CONTINUATION_POINT": "待设置",
+        },
+    )
+    overview_directory = day_directory / "当日总览产物"
+    overview_directory.mkdir(exist_ok=True)
+    materialize_template(
+        "day-overview.md",
+        overview_directory / "当日统一总结.md",
+        {
+            **common,
+            "LOCAL_FLOW_ARTIFACT_LINKS": "暂无",
+            "WHOLE_FRAMEWORK_RELATION": "待整理",
+            "CROSS_SOURCE_CONCLUSIONS": "待整理",
+            "ARTIFACTS": "- 暂无已登记产物",
+        },
+    )
 
 
 def command_start_day(args: argparse.Namespace) -> Path:
@@ -1952,21 +1927,15 @@ def command_start_day(args: argparse.Namespace) -> Path:
     if args.day != target_day["day"]:
         raise WorkspaceError(f"the next Day must be {target_day['day']}")
 
-    bounds = stage_range_for(0, state["stage_ranges"])
-    revision = _target_stage_revision(state, args.day, bounds)
-    target = _prepare_stage_target(root, state, args.day, bounds, revision)
-    created = create_stage(root, args.day, bounds, revision)
-    if created != target:
-        raise WorkspaceError("created stage path does not match target")
+    day_directory = _validated_day_directory(root, state, args.day)
+    _create_day_level_files(day_directory, target_day)
 
     target_day["status"] = "active"
     target_day["progress"] = 0
-    stage = _stage_record(root, created, args.day, bounds, revision)
-    state["stages"].append(stage)
     state["current"].update(
         {
             "day": args.day,
-            "stage": copy.deepcopy(stage),
+            "chain": None,
             "progress": 0,
             "last_source": None,
             "resume_marker": "",
@@ -1974,8 +1943,41 @@ def command_start_day(args: argparse.Namespace) -> Path:
         }
     )
     _append_history(state, "start-day", day=args.day)
-    _save_with_created_stage(root, state, created)
+    save_state(root, state)
     return root
+
+
+def command_begin_chain(args: argparse.Namespace) -> Path:
+    root = Path(args.learning_root).expanduser().resolve(strict=True)
+    state = load_state(root)
+    day = _active_day(state)
+    if args.day != day["day"]:
+        raise WorkspaceError("begin-chain must target the active Day")
+    if not isinstance(args.name, str) or not args.name.strip():
+        raise WorkspaceError("chain name must be non-empty")
+    name = _validate_label_component(args.name.strip())
+
+    existing = [chain for chain in state["chains"] if chain["day"] == day["day"]]
+    order = len(existing) + 1
+    target = _prepare_chain_target(root, state, day["day"], order, name)
+    created = create_chain(root, day["day"], order, name)
+    if created != target:
+        raise WorkspaceError("created chain path does not match target")
+
+    if state["current"].get("chain") is not None:
+        _seal_active_chain(state)
+    chain = _chain_record(root, created, day["day"], order, name)
+    state["chains"].append(chain)
+    state["current"]["chain"] = copy.deepcopy(chain)
+    _append_history(
+        state,
+        "begin-chain",
+        day=day["day"],
+        chain=chain["path"],
+        name=name,
+    )
+    _save_with_created_chain(root, state, created)
+    return created
 
 
 def command_complete_checkpoint(args: argparse.Namespace) -> Path:
@@ -1988,21 +1990,6 @@ def command_complete_checkpoint(args: argparse.Namespace) -> Path:
     progress = _progress_for(day)
     day["progress"] = progress
     state["current"]["progress"] = progress
-    target_bounds = stage_range_for(progress, state["stage_ranges"])
-    current_bounds = state["current"]["stage"]["range"]
-    created: Path | None = None
-    if target_bounds != current_bounds:
-        revision = _target_stage_revision(state, day["day"], target_bounds)
-        target = _prepare_stage_target(
-            root, state, day["day"], target_bounds, revision
-        )
-        created = create_stage(root, day["day"], target_bounds, revision)
-        if created != target:
-            raise WorkspaceError("created stage path does not match target")
-        _seal_active_stage(state)
-        stage = _stage_record(root, created, day["day"], target_bounds, revision)
-        state["stages"].append(stage)
-        state["current"]["stage"] = copy.deepcopy(stage)
     _append_history(
         state,
         "complete-checkpoint",
@@ -2010,20 +1997,8 @@ def command_complete_checkpoint(args: argparse.Namespace) -> Path:
         checkpoint=args.checkpoint,
         progress=progress,
     )
-    if created is None:
-        save_state(root, state)
-    else:
-        _save_with_created_stage(root, state, created)
+    save_state(root, state)
     return root
-
-
-def _next_revision(state: dict, day: int, bounds: list[int]) -> int:
-    revisions = [
-        stage["revision"]
-        for stage in state["stages"]
-        if stage["day"] == day and stage["range"] == bounds
-    ]
-    return max(revisions, default=0) + 1
 
 
 def command_reopen_checkpoint(args: argparse.Namespace) -> Path:
@@ -2039,16 +2014,6 @@ def command_reopen_checkpoint(args: argparse.Namespace) -> Path:
     progress = _progress_for(day)
     day["progress"] = progress
     state["current"]["progress"] = progress
-    bounds = stage_range_for(progress, state["stage_ranges"])
-    revision = _next_revision(state, day["day"], bounds)
-    target = _prepare_stage_target(root, state, day["day"], bounds, revision)
-    created = create_stage(root, day["day"], bounds, revision)
-    if created != target:
-        raise WorkspaceError("created stage path does not match target")
-    _seal_active_stage(state)
-    stage = _stage_record(root, created, day["day"], bounds, revision)
-    state["stages"].append(stage)
-    state["current"]["stage"] = copy.deepcopy(stage)
     _append_history(
         state,
         "reopen-checkpoint",
@@ -2057,7 +2022,7 @@ def command_reopen_checkpoint(args: argparse.Namespace) -> Path:
         reason=args.reason.strip(),
         progress=progress,
     )
-    _save_with_created_stage(root, state, created)
+    save_state(root, state)
     return root
 
 
@@ -2088,26 +2053,25 @@ def command_set_resume(args: argparse.Namespace) -> Path:
 
 
 def command_add_source(args: argparse.Namespace) -> Path:
-    stage_argument = Path(args.stage).expanduser()
-    if not stage_argument.is_absolute():
-        stage_argument = Path.cwd() / stage_argument
-    stage_argument = Path(os.path.abspath(stage_argument))
-    if stage_argument.is_symlink():
-        raise WorkspaceError("stage must not be a symlink")
+    day_argument = Path(args.day_dir).expanduser()
+    if not day_argument.is_absolute():
+        day_argument = Path.cwd() / day_argument
+    day_argument = Path(os.path.abspath(day_argument))
+    if day_argument.is_symlink():
+        raise WorkspaceError("Day directory must not be a symlink")
     try:
-        stage = stage_argument.resolve(strict=True)
+        day_dir = day_argument.resolve(strict=True)
     except OSError as exc:
-        raise WorkspaceError(f"stage does not exist: {stage_argument}") from exc
-    if not stage.is_dir():
-        raise WorkspaceError("stage is not a directory")
+        raise WorkspaceError(f"Day directory does not exist: {day_argument}") from exc
+    if not day_dir.is_dir():
+        raise WorkspaceError("Day directory is not a directory")
 
     try:
-        root = stage_argument.parent.parent.resolve(strict=True)
+        root = day_argument.parent.resolve(strict=True)
     except OSError as exc:
-        raise WorkspaceError("cannot locate the learning root for stage") from exc
+        raise WorkspaceError("cannot locate the learning root for the Day directory") from exc
     state = load_state(root)
-    stage_record = active_stage_record(state, stage)
-    stage_id = stage_record["path"]
+    day = active_day_directory(state, day_dir)
     repository = Path(state["repository"])
     try:
         source = resolved_under(Path(args.source), repository)
@@ -2120,7 +2084,7 @@ def command_add_source(args: argparse.Namespace) -> Path:
         (
             entry
             for entry in state["sources"]
-            if entry.get("stage_id") == stage_id
+            if entry.get("day") == day["day"]
             and entry.get("canonical_source_path") == str(source)
         ),
         None,
@@ -2130,21 +2094,22 @@ def command_add_source(args: argparse.Namespace) -> Path:
 
     _require_source_dir_fd_support()
 
-    stage_sources = [
-        entry for entry in state["sources"] if entry.get("stage_id") == stage_id
+    day_sources = [
+        entry for entry in state["sources"] if entry.get("day") == day["day"]
     ]
-    order = len(stage_sources) + 1
+    order = len(day_sources) + 1
     label = source_label(
         source,
         repository,
         getattr(args, "label", None),
-        {entry["label"] for entry in stage_sources},
+        {entry["label"] for entry in day_sources},
     )
-    target = stage / f"{order:02d}-{label}"
+    target = day_dir / f"{order:02d}-{label}"
     relative_learning_dir = target.relative_to(root).as_posix()
+    day_directory_text = day_dir.relative_to(root).as_posix()
     expected_marker = _expected_source_marker(
         state["learning_root_id"],
-        stage_id,
+        day_directory_text,
         str(source),
         relative_learning_dir,
         order,
@@ -2156,7 +2121,7 @@ def command_add_source(args: argparse.Namespace) -> Path:
             "SOURCE_LABEL": label,
             "CANONICAL_SOURCE_PATH": source,
             "REPOSITORY_RELATIVE_PATH": source.relative_to(repository).as_posix(),
-            "STAGE_ID": stage_id,
+            "DAY_ID": day_directory_text,
             "SYMBOLS_LINES": "待补充",
             "CALLER": "待确认",
             "CALLEE": "待确认",
@@ -2172,40 +2137,34 @@ def command_add_source(args: argparse.Namespace) -> Path:
         | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
-        stage_fd = os.open(stage, open_flags)
+        day_fd = os.open(day_dir, open_flags)
     except OSError as exc:
-        raise WorkspaceError("active stage changed before source registration") from exc
-    expected_stage_marker = _expected_stage_marker(
-        state["learning_root_id"],
-        stage_record["day"],
-        stage_record["range"],
-        stage_record["revision"],
-    )
+        raise WorkspaceError("active Day directory changed before source registration") from exc
     created = False
     published_fd: int | None = None
     try:
-        if not _stable_stage_matches(stage_fd, stage, root, expected_stage_marker):
-            raise WorkspaceError("active stage changed before source registration")
-        if _source_entry_exists_at(stage_fd, target.name):
+        if not _stable_day_matches(day_fd, day_dir, root):
+            raise WorkspaceError("active Day directory changed before source registration")
+        if _source_entry_exists_at(day_fd, target.name):
             if not _remove_generated_source_at(
-                stage_fd, target.name, expected_marker, allow_partial=False
+                day_fd, target.name, expected_marker, allow_partial=False
             ):
                 raise WorkspaceError(
                     f"source target is occupied by an unknown directory: {target}"
                 )
-        source_creation_seam(stage)
-        if not _stable_stage_matches(stage_fd, stage, root, expected_stage_marker):
-            raise WorkspaceError("active stage changed before source directory creation")
+        source_creation_seam(day_dir)
+        if not _stable_day_matches(day_fd, day_dir, root):
+            raise WorkspaceError("active Day directory changed before source directory creation")
         published_fd = _create_source_directory_at(
-            stage_fd, target.name, expected_marker, guide
+            day_fd, target.name, expected_marker, guide
         )
         created = True
         if (
-            not _stable_stage_matches(stage_fd, stage, root, expected_stage_marker)
-            or not _entry_matches_fd(stage_fd, target.name, published_fd)
+            not _stable_day_matches(day_fd, day_dir, root)
+            or not _entry_matches_fd(day_fd, target.name, published_fd)
         ):
             cleaned = _remove_generated_source_handle_at(
-                stage_fd,
+                day_fd,
                 target.name,
                 published_fd,
                 expected_marker,
@@ -2216,10 +2175,10 @@ def command_add_source(args: argparse.Namespace) -> Path:
                 raise WorkspaceError(
                     "generated source identity changed; residue was preserved safely"
                 )
-            raise WorkspaceError("active stage changed during source directory creation")
+            raise WorkspaceError("active Day directory changed during source directory creation")
 
         record = {
-            "stage_id": stage_id,
+            "day": day["day"],
             "canonical_source_path": str(source),
             "repository_relative_path": source.relative_to(repository).as_posix(),
             "relative_learning_dir": relative_learning_dir,
@@ -2231,8 +2190,7 @@ def command_add_source(args: argparse.Namespace) -> Path:
         _append_history(
             state,
             "add-source",
-            day=stage_record["day"],
-            stage_id=stage_id,
+            day=day["day"],
             source=str(source),
             directory=relative_learning_dir,
         )
@@ -2241,7 +2199,7 @@ def command_add_source(args: argparse.Namespace) -> Path:
         except BaseException as exc:
             if created and not _state_was_committed(root, state):
                 cleaned = _remove_generated_source_handle_at(
-                    stage_fd,
+                    day_fd,
                     target.name,
                     published_fd,
                     expected_marker,
@@ -2256,7 +2214,7 @@ def command_add_source(args: argparse.Namespace) -> Path:
     finally:
         if published_fd is not None:
             os.close(published_fd)
-        os.close(stage_fd)
+        os.close(day_fd)
     return target
 
 
@@ -2389,7 +2347,7 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
         raise WorkspaceError("artifact owner directory must be canonical")
 
     owner_kind = args.owner_kind
-    owner_stage: dict | None = None
+    owner_active_parent: dict | None = None
     if owner_kind == "source":
         try:
             owner_relative_text = owner.relative_to(root).as_posix()
@@ -2408,39 +2366,67 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
                 "source artifact owner must be a registered source"
             )
         relative_owner = matches[0]["relative_learning_dir"]
-        owner_stage = next(
+        owner_active_parent = next(
             (
-                stage
-                for stage in state["stages"]
-                if stage.get("path") == matches[0].get("stage_id")
+                day
+                for day in state["days"]
+                if day.get("day") == matches[0].get("day")
             ),
             None,
         )
-        if owner_stage is None:
-            raise WorkspaceError("source artifact owner references an unknown stage")
+        if owner_active_parent is None:
+            raise WorkspaceError("source artifact owner references an unknown Day")
         owner_id = f"source:{relative_owner}"
         allowed_directory = owner / "产物"
         owner_markdown = owner / "源码导读.md"
         markdown_name = "源码导读.md"
     elif owner_kind == "day-overview":
-        owner_stage_matches = [
-            stage
-            for stage in state["stages"]
-            if owner == root / stage["path"] / "当日总览产物"
-        ]
-        if len(owner_stage_matches) != 1:
+        relative_owner_text = owner.relative_to(root).as_posix()
+        if not relative_owner_text.endswith("/当日总览产物"):
             raise WorkspaceError(
-                "day overview owner must belong to a registered stage"
+                "day overview owner must be a Day's 当日总览产物 directory"
             )
-        owner_stage = owner_stage_matches[0]
-        owner_stage_id = owner_stage["path"]
-        relative_owner = owner.relative_to(root).as_posix()
-        owner_id = f"day-overview:{owner_stage_id}"
+        day_dir_text = relative_owner_text[: -len("/当日总览产物")]
+        owner_day = next(
+            (
+                day
+                for day in state["days"]
+                if _day_directory(root, state, day["day"]).relative_to(root).as_posix()
+                == day_dir_text
+            ),
+            None,
+        )
+        if owner_day is None:
+            raise WorkspaceError("artifact references an unknown day overview owner")
+        owner_active_parent = owner_day
+        relative_owner = relative_owner_text
+        owner_id = f"day-overview:{owner_day['day']}"
         allowed_directory = owner
         owner_markdown = owner / "当日统一总结.md"
         markdown_name = "当日统一总结.md"
+    elif owner_kind == "chain":
+        relative_owner_text = owner.relative_to(root).as_posix()
+        if not relative_owner_text.endswith("/产物"):
+            raise WorkspaceError("chain owner must be a chain's 产物 directory")
+        chain_dir_text = relative_owner_text[: -len("/产物")]
+        owner_chain = next(
+            (
+                chain
+                for chain in state["chains"]
+                if chain.get("path") == chain_dir_text
+            ),
+            None,
+        )
+        if owner_chain is None:
+            raise WorkspaceError("artifact references an unknown chain owner")
+        owner_active_parent = owner_chain
+        relative_owner = relative_owner_text
+        owner_id = f"chain:{chain_dir_text}"
+        allowed_directory = owner
+        owner_markdown = owner.parent / "链说明.md"
+        markdown_name = "链说明.md"
     else:
-        raise WorkspaceError("owner kind must be source or day-overview")
+        raise WorkspaceError("owner kind must be source, day-overview, or chain")
 
     if allowed_directory.is_symlink():
         raise WorkspaceError("artifact directory must not be a symlink")
@@ -2499,14 +2485,17 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
         if not _stable_path_matches_fd(artifact, artifact_fd, directory=False):
             raise WorkspaceError("artifact identity changed")
 
-        markdown_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        markdown_fd = os.open(markdown_name, markdown_flags, dir_fd=owner_fd)
-        markdown_metadata = os.fstat(markdown_fd)
-        if not stat.S_ISREG(markdown_metadata.st_mode) or not _entry_matches_metadata(
-            owner_fd, markdown_name, markdown_metadata, regular=True
-        ):
-            raise WorkspaceError("owner Markdown must be a stable regular file")
-        markdown = _read_utf8_fd(markdown_fd, "owner Markdown")
+        markdown = None
+        markdown_metadata = None
+        if owner_kind != "chain":
+            markdown_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            markdown_fd = os.open(markdown_name, markdown_flags, dir_fd=owner_fd)
+            markdown_metadata = os.fstat(markdown_fd)
+            if not stat.S_ISREG(markdown_metadata.st_mode) or not _entry_matches_metadata(
+                owner_fd, markdown_name, markdown_metadata, regular=True
+            ):
+                raise WorkspaceError("owner Markdown must be a stable regular file")
+            markdown = _read_utf8_fd(markdown_fd, "owner Markdown")
 
         physical_identity = (artifact_metadata.st_dev, artifact_metadata.st_ino)
         existing_matches = [
@@ -2535,19 +2524,30 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
             and existing.get("relative_artifact_path") != relative_artifact
         ):
             raise WorkspaceError("artifact ownership record is inconsistent")
-        owner_is_active = (
-            owner_stage is not None
-            and owner_stage.get("status") == "active"
-            and state["current"].get("stage") == owner_stage
-            and any(
-                day.get("day") == owner_stage.get("day")
-                and day.get("status") == "active"
-                for day in state["days"]
+        if owner_kind == "source":
+            owner_is_active = (
+                owner_active_parent is not None
+                and owner_active_parent.get("status") == "active"
             )
-        )
+        elif owner_kind == "day-overview":
+            owner_is_active = (
+                owner_active_parent is not None
+                and owner_active_parent.get("status") == "active"
+            )
+        else:
+            owner_is_active = (
+                owner_active_parent is not None
+                and owner_active_parent.get("status") == "active"
+                and state["current"].get("chain") == owner_active_parent
+                and any(
+                    day.get("day") == owner_active_parent.get("day")
+                    and day.get("status") == "active"
+                    for day in state["days"]
+                )
+            )
         if is_new and not owner_is_active:
             raise WorkspaceError(
-                "new artifact registration requires an owner in the active stage"
+                "new artifact registration requires an active owner"
             )
 
         candidate = copy.deepcopy(state)
@@ -2566,66 +2566,69 @@ def command_register_artifact(args: argparse.Namespace) -> Path:
             )
             candidate["updated_at"] = _utc_timestamp()
             _validate_candidate_state(root, candidate)
-        owner_entries = sorted(
-            (
-                f"- `{entry['relative_artifact_path']}`"
-                for entry in candidate["artifacts"]
-                if entry.get("owner_id") == owner_id
-            ),
-            key=str.casefold,
-        )
-        candidate_markdown = replace_managed_artifact_block(
-            markdown, owner_entries
-        )
+        candidate_markdown = None
+        if markdown is not None:
+            owner_entries = sorted(
+                (
+                    f"- `{entry['relative_artifact_path']}`"
+                    for entry in candidate["artifacts"]
+                    if entry.get("owner_id") == owner_id
+                ),
+                key=str.casefold,
+            )
+            candidate_markdown = replace_managed_artifact_block(
+                markdown, owner_entries
+            )
         candidate_json = _state_text(candidate)
 
         artifact_pre_authority_seam(root, candidate, owner_markdown, artifact)
-        if (
-            not _stable_path_matches_fd(owner, owner_fd, directory=True)
-            or not _entry_matches_metadata(
-                owner_fd, markdown_name, markdown_metadata, regular=True
+        inputs_stable = _stable_path_matches_fd(owner, owner_fd, directory=True) and _entry_matches_metadata(
+            artifact_parent_fd,
+            artifact_name,
+            artifact_metadata,
+            regular=True,
+        ) and _stable_path_matches_fd(artifact, artifact_fd, directory=False)
+        if markdown is not None:
+            inputs_stable = (
+                inputs_stable
+                and _entry_matches_metadata(
+                    owner_fd, markdown_name, markdown_metadata, regular=True
+                )
+                and _read_utf8_fd(markdown_fd, "owner Markdown") == markdown
             )
-            or not _entry_matches_metadata(
-                artifact_parent_fd,
-                artifact_name,
-                artifact_metadata,
-                regular=True,
-            )
-            or not _stable_path_matches_fd(artifact, artifact_fd, directory=False)
-            or _read_utf8_fd(markdown_fd, "owner Markdown") != markdown
-        ):
+        if not inputs_stable:
             raise WorkspaceError("artifact registration inputs changed before commit")
 
         if is_new:
             replace_authority_json(root / "学习状态.json", candidate_json)
         try:
             artifact_post_authority_seam(root, candidate, owner_markdown, artifact)
-            if (
-                not _stable_path_matches_fd(owner, owner_fd, directory=True)
-                or not _entry_matches_metadata(
-                    owner_fd, markdown_name, markdown_metadata, regular=True
+            inputs_stable = _stable_path_matches_fd(owner, owner_fd, directory=True) and _entry_matches_metadata(
+                artifact_parent_fd,
+                artifact_name,
+                artifact_metadata,
+                regular=True,
+            ) and _stable_path_matches_fd(artifact, artifact_fd, directory=False)
+            if markdown is not None:
+                inputs_stable = (
+                    inputs_stable
+                    and _entry_matches_metadata(
+                        owner_fd, markdown_name, markdown_metadata, regular=True
+                    )
+                    and _read_utf8_fd(markdown_fd, "owner Markdown") == markdown
                 )
-                or _read_utf8_fd(markdown_fd, "owner Markdown") != markdown
-                or not _entry_matches_metadata(
-                    artifact_parent_fd,
-                    artifact_name,
-                    artifact_metadata,
-                    regular=True,
-                )
-                or not _stable_path_matches_fd(
-                    artifact, artifact_fd, directory=False
-                )
-            ):
+            if not inputs_stable:
                 raise WorkspaceError(
                     "artifact registration inputs changed after authority commit"
                 )
-            replace_owner_markdown(
-                owner_fd,
-                markdown_name,
-                candidate_markdown,
-                markdown_metadata,
-                markdown,
-            )
+            if candidate_markdown is not None:
+                replace_owner_markdown(
+                    owner_fd,
+                    markdown_name,
+                    candidate_markdown,
+                    markdown_metadata,
+                    markdown,
+                )
         except (OSError, UnicodeError, WorkspaceError) as exc:
             if is_new or _state_was_committed(root, candidate):
                 raise WorkspaceError(
@@ -2669,15 +2672,16 @@ def command_complete_day(args: argparse.Namespace) -> Path:
         checkpoint["status"] != "completed" for checkpoint in day["checkpoints"]
     ):
         raise WorkspaceError("all checkpoints must be completed before completing the Day")
-    if sum(stage["status"] == "active" for stage in state["stages"]) != 1:
-        raise WorkspaceError("completing a Day requires exactly one active stage")
-    _seal_active_stage(state)
+    if sum(chain["status"] == "active" for chain in state["chains"]) > 1:
+        raise WorkspaceError("an active Day cannot have more than one active chain")
+    if any(chain["status"] == "active" for chain in state["chains"]):
+        _seal_active_chain(state)
     day["status"] = "completed"
     day["progress"] = 100
     state["current"].update(
         {
             "day": None,
-            "stage": None,
+            "chain": None,
             "progress": 0,
             "last_source": None,
             "resume_marker": "",
@@ -2798,10 +2802,18 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--marker", required=True)
     resume_parser.set_defaults(handler=command_set_resume)
 
-    source_parser = subparsers.add_parser(
-        "add-source", help="register a repository source in the active stage"
+    chain_parser = subparsers.add_parser(
+        "begin-chain", help="begin a new learning chain in the active Day"
     )
-    source_parser.add_argument("--stage", required=True)
+    chain_parser.add_argument("--learning-root", required=True)
+    chain_parser.add_argument("--day", required=True, type=int)
+    chain_parser.add_argument("--name", required=True)
+    chain_parser.set_defaults(handler=command_begin_chain)
+
+    source_parser = subparsers.add_parser(
+        "add-source", help="register a repository source in the active Day"
+    )
+    source_parser.add_argument("--day-dir", required=True)
     source_parser.add_argument("--source", required=True)
     source_parser.add_argument("--label")
     source_parser.set_defaults(handler=command_add_source)
@@ -2811,7 +2823,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     artifact_parser.add_argument("--learning-root", required=True)
     artifact_parser.add_argument(
-        "--owner-kind", required=True, choices=("source", "day-overview")
+        "--owner-kind", required=True, choices=("source", "day-overview", "chain")
     )
     artifact_parser.add_argument("--owner-dir", required=True)
     artifact_parser.add_argument("--artifact", required=True)

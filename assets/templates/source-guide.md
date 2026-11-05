@@ -2,7 +2,7 @@
 
 - 真实源码路径：`{{CANONICAL_SOURCE_PATH}}`
 - 仓库相对路径：`{{REPOSITORY_RELATIVE_PATH}}`
-- 所属阶段：`{{STAGE_ID}}`
+- 所属 Day：`{{DAY_ID}}`
 - 符号 / 行号：{{SYMBOLS_LINES}}
 - 调用方：{{CALLER}}
 - 被调用方：{{CALLEE}}
